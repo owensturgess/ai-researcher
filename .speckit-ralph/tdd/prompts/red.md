@@ -27,47 +27,19 @@ Do NOT include implementation code. Do NOT include explanations outside of code 
 
 ## Behavior Under Test
 
-Behavior B001: When the daily scheduled run executes with at least one active source configured, an email briefing is delivered to each configured recipient's inbox
-Linked tasks: T019, T022, T026
+Behavior B002: Each briefing item displays a title, source name, 2-3 sentence executive summary, relevance tag, urgency indicator (Informational / Worth Discussing / Action Needed), and a clickable source link
+Linked tasks: T021, T022, T023
 
 ## Previous Validation Feedback (MUST address these issues)
+No test code was submitted for review. The file at
+`.speckit-ralph/tdd/iterations/B002-red.md` contains only the
+rationale and intent description (12 lines of prose), but no
+Python test function.
 
-
-**Check 4 FAILED — Mocks internal collaborator**
-
-Line violated:
-```python
-with patch("src.briefing.handler.load_settings", return_value=mock_settings):
-```
-
-`load_settings` is an internal project function defined in `src/shared/config.py`. It is not a system boundary (external API, database, filesystem, or network). Patching it couples the test to the internal import structure of `src/briefing/handler.py` — if the implementation is refactored to load settings differently (e.g., calling a different helper, reading env vars directly), this patch silently breaks or becomes a no-op.
-
-**How to fix**: Remove the `load_settings` patch. Instead, seed the settings input through the boundary that is already mocked: S3. Write a `settings.yaml`-equivalent JSON object to the mocked S3 bucket under the key the handler is documented to read from, or inject configuration exclusively via the `event` dict if the handler interface supports it. All configuration that the handler consumes must enter through an observable, boundary-level mechanism — not by patching an internal function.
-
----
-
-**Check 2 FAILED — Accesses undocumented return field**
-
-Line violated:
-```python
-recipients_notified = result.get("recipients_delivered", [])
-```
-
-The documented public interface for `briefing_handler` specifies the return dict contains: `status`, `delivery_status`, `items_included`. The field `recipients_delivered` does not appear in the interface contract. This test asserts on an implementation-specific field that could be renamed, removed, or restructured without breaking the public contract.
-
-**How to fix**: Restrict assertions to the three documented return fields (`delivery_status`, `items_included`, `status`). The observable proof that all recipients were reached is that `delivery_status == "delivered"` and `items_included >= 1`, combined with verifying SES send count via moto's mock SES. Use `ses.get_send_statistics()` (already called but unused) or check the moto-captured send count to verify the number of SES `send_email` calls equals `len(TEST_RECIPIENTS)`, without relying on an undocumented response field.
-
----
-
-**Secondary issue (does not independently cause FAIL but should be noted)**
-
-Lines:
-```python
-send_quota = ses.get_send_statistics()
-sent_messages = ses.list_identities()
-```
-
-Both variables are assigned but never used in any assertion. This dead code suggests the intended SES-based verification was abandoned in favor of the undocumented `recipients_delivered` field. Removing these lines and replacing the `recipients_delivered` assertion with a proper moto SES send count check would resolve both issues simultaneously.
+To proceed, write the actual test code — a pytest function in
+`tests/briefing/test_template.py` (or similar) that uses Jinja2
+to load `briefing.html` and asserts the required behaviors — then
+resubmit for validation.
 ```
 
 ## Public Interfaces (from interfaces.md)
