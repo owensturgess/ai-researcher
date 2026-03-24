@@ -1,3 +1,5 @@
+The behavior queue and public interfaces already exist and are well-defined. Let me verify them against the current spec artifacts and produce the updated PLAN output.
+
 # Behavior Queue
 
 ## User Story 1: Daily Morning Briefing Delivery
@@ -9,13 +11,13 @@
 | B003 | The briefing email renders correctly on mobile devices with clear hierarchy and no horizontal scrolling | US1.S3 | T023 | complete |
 | B004 | When the pipeline fails before the delivery deadline, a fallback notification email is sent to all recipients explaining the delay and expected resolution | US1.S4 | T025 | complete |
 | B005 | When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing | Edge Case | T024 | complete |
-| B006 | Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status | US1.S1 | T027 | queued |
+| B006 | Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status | US1.S1 | T027 | red |
 
 ## User Story 2: Multi-Format Source Ingestion
 
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
-| B007 | Given a configured source list with RSS/web entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from RSS/web sources | US2.S1 | T014, T015, T019 | queued |
+| B007 | Given a configured source list with RSS/web entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from RSS/web sources | US2.S1 | T014, T015, T019 | complete |
 | B008 | Given a configured source list with X (Twitter) entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from X sources | US2.S1 | T016, T019 | queued |
 | B009 | Given a configured source list with YouTube entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from YouTube sources | US2.S1 | T017, T019 | queued |
 | B010 | Given a configured source list with podcast entries, when daily ingestion runs, new episodes published in the last 24 hours are retrieved from podcast feeds | US2.S1 | T018, T019 | queued |
@@ -70,6 +72,4 @@
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
 | B036 | Raw content, transcripts, scored items, and briefings older than 30 days are automatically deleted | FR-021 | T010, T051 | queued |
-
----
 

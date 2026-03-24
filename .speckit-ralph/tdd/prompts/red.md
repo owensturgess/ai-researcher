@@ -2,6 +2,12 @@
 
 You are the **Test Writer** in a TDD loop. Your job is to write exactly ONE failing test for the behavior described below. The test must target observable behavior through the public interface only.
 
+## CRITICAL: You MUST write the file to disk
+
+You MUST use your file-writing tools to create the test file on disk. Do NOT just output or describe the code — actually write it. The file must exist on the filesystem when you are done.
+
+Create any necessary directories (e.g., `tests/`) if they don't exist.
+
 ## Rules
 
 1. Write **exactly one test** — do not write multiple tests or test helpers.
@@ -17,18 +23,32 @@ You are the **Test Writer** in a TDD loop. Your job is to write exactly ONE fail
 
 ## Output Format
 
-Output the complete test file content that should be written. Include:
-- The file path as a comment on the first line (e.g., `# tests/test_calculator.py`)
-- All necessary imports
-- The single test function/method
-- Any test-specific setup (fixtures, mocks at boundaries)
+Write the test file to disk, then confirm what you wrote by outputting:
+
+```
+FILE: <path/to/test_file>
+```
+
+Include the file path as a comment on the first line of the file (e.g., `# tests/test_calculator.py`).
 
 Do NOT include implementation code. Do NOT include explanations outside of code comments.
 
+If you encounter a failure that future steps should learn from, output a guardrail block:
+
+```
+### Sign: <short title>
+- **Category**: RED-FAILURE
+- **Detail**: <what went wrong and how to avoid it>
+```
+
 ## Behavior Under Test
 
-Behavior B005: When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing
-Linked tasks: T024
+Behavior B007: Given a configured source list with RSS/web entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from RSS/web sources
+Linked tasks: T014, T015, T019
+
+## Previous Validation Feedback (MUST address these issues)
+There is no test code to validate. The RED phase for B007 did not complete — the agent halted with a permission request ("The file write needs your permission...") and the file `tests/unit/test_rss_ingestion.py` was never written. Re-run the RED phase and approve the file write when prompted, then re-submit the test file for validation.
+```
 
 ## Public Interfaces (from interfaces.md)
 
@@ -171,7 +191,7 @@ Linked tasks: T024
 **Purpose**: Detects and collapses duplicate content items that cover the same development across sources.
 
 **Public methods**:
-- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as the tiebreaker; semantic dedup after scoring uses relevance.
+- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance.
 - `deduplicate_by_semantics(scored_items: list of ScoredItem)` → return: List of ScoredItem with is_duplicate and duplicate_of fields populated. Items covering the same core development are flagged, retaining the highest-relevance version as primary. Items with genuinely different angles are preserved as distinct.
 
 **Exercised by**: B028, B029, B030
@@ -265,14 +285,18 @@ Linked tasks: T024
 
 # Constitution Validation
 
-The constitution provided contains only template placeholders with no specific principles defined. The following standard validations apply:
+The constitution contains only template placeholders with no specific principles defined. Standard validations applied:
 
-1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models → ingestion → transcription → scoring → briefing → monitoring).
+1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models -> ingestion -> transcription -> scoring -> briefing -> monitoring).
 2. **Public interface only**: All behaviors are defined against public handler entry points, public module functions, and observable outputs (emails, S3 objects, CloudWatch metrics). No behavior requires accessing internal implementation details.
-3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B007–B010: individual source ingestion) precede composed behaviors (B001: end-to-end delivery), allowing incremental red-green-refactor progression.
-4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue — each behavior defines what to test before the corresponding task is committed.
+3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B001-B005: briefing delivery) precede source-specific behaviors (B007-B010), which precede hardening behaviors (B013-B018).
+4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue.
 
 ⚠️ **Flag**: `deduplicate_by_url` in B028 runs before scoring but the spec (US5.S1) says "only the highest-relevance version appears" — URL dedup cannot use relevance scores. The interface definition notes this: URL dedup uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance. Tests should validate both stages separately.
+
+---
+
+**Current progress**: B001-B005 complete, B006 in RED phase. Next behavior to implement: B006 (pipeline run metadata recording). The behavior queue and public interfaces are stable and consistent with all spec artifacts.
 
 ## Existing Tests (for context — do not duplicate)
 

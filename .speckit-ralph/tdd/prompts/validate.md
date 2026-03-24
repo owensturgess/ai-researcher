@@ -41,101 +41,17 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-It seems write permission to `tests/unit/test_briefing.py` hasn't been granted. Here's the complete test file content to write at `tests/unit/test_briefing.py`:
+The write needs your approval — please allow it when prompted. Once the file is written:
 
-```python
-# tests/unit/test_briefing.py
-import os
-import json
-import pytest
-from datetime import date
-from unittest.mock import MagicMock, patch, call
-
-
-@pytest.fixture
-def config_dir(tmp_path):
-    d = tmp_path / "config"
-    d.mkdir()
-    (d / "settings.yaml").write_text(
-        "schedule: '0 7 * * *'\n"
-        "relevance_threshold: 70\n"
-        "max_briefing_items: 10\n"
-        "budget_caps:\n"
-        "  transcribe_minutes: 60\n"
-        "  bedrock_tokens: 100000\n"
-        "recipients:\n"
-        "  - name: Alice\n"
-        "    email: alice@example.com\n"
-        "    timezone: UTC\n"
-        "retention_days: 30\n"
-    )
-    (d / "sources.yaml").write_text("sources: []\n")
-    (d / "context-prompt.txt").write_text("Evaluate relevance.\n")
-    return str(d)
-
-
-def test_sends_no_significant_developments_email_when_no_items_pass_threshold(config_dir):
-    """When no scored items exceed the relevance threshold, a 'no significant developments' confirmation email is sent."""
-    bucket = "test-pipeline-bucket"
-    sender = "briefing@example.com"
-    run_date = date.today().isoformat()
-
-    # Boundary mock: S3 returns no scored items for today's run
-    mock_s3 = MagicMock()
-    mock_s3.list_objects_v2.return_value = {"Contents": [], "KeyCount": 0}
-    mock_s3.put_object.return_value = {}
-
-    # Boundary mock: SES — capture outbound email content
-    mock_ses = MagicMock()
-    mock_ses.send_email.return_value = {"MessageId": "test-msg-001"}
-
-    def boto3_client_factory(service_name, **kwargs):
-        if service_name == "s3":
-            return mock_s3
-        if service_name == "ses":
-            return mock_ses
-        return MagicMock()
-
-    with patch("boto3.client", side_effect=boto3_client_factory), \
-         patch.dict(os.environ, {
-             "S3_BUCKET": bucket,
-             "SES_SENDER": sender,
-             "CONFIG_DIR": config_dir,
-             "RUN_DATE": run_date,
-             "AWS_DEFAULT_REGION": "us-east-1",
-         }):
-        from src.briefing.handler import handler
-        result = handler({}, None)
-
-    # No items should have been included
-    assert result["items_included"] == 0
-
-    # Email must have been delivered — not silently skipped
-    assert result["delivery_status"] == "delivered"
-
-    # The email must be the "no significant developments" variant, not an empty or missing briefing
-    assert mock_ses.send_email.called, "Expected SES send_email to be called when no items pass threshold"
-
-    send_kwargs = mock_ses.send_email.call_args[1]
-    body = send_kwargs.get("Message", {}).get("Body", {})
-    html_body = body.get("Html", {}).get("Data", "")
-    text_body = body.get("Text", {}).get("Data", "")
-    combined = (html_body + text_body).lower()
-
-    assert "no significant developments" in combined, (
-        f"Expected 'no significant developments' in email body; "
-        f"got preview: {combined[:300]!r}"
-    )
+```
+FILE: tests/unit/test_rss_ingestion.py
 ```
 
-**Design decisions:**
-
-- **Mocked at boundaries only**: `boto3.client` is intercepted to return fakes for S3 (empty scored items) and SES (captures send calls). Config files are written to a real `tmp_path` filesystem — that's the boundary, not mocked.
-- **Three logical assertions on one outcome** — all verify the same observable behavior: a "no significant developments" email was sent (not skipped, not empty):
-  1. `items_included == 0` — confirms the threshold filter ran
-  2. `delivery_status == "delivered"` — confirms no silent skip
-  3. `"no significant developments" in email body` — confirms the correct variant was rendered and sent
-- **Will fail immediately**: `src/briefing/handler.py` doesn't exist yet, so the import raises `ModuleNotFoundError`.
+The test:
+- Mocks `feedparser.parse` at the system boundary (external HTTP call)
+- Creates a `Source` with `type="rss"` and calls the public `ingest(source, since)` interface
+- Asserts one `ContentItem` is returned with the correct `title`, `source_id`, `original_url`, and `published_date >= since`
+- Will fail immediately since `src/ingestion/sources/rss.py` does not exist yet
 
 ## Public Interfaces (from interfaces.md)
 
@@ -278,7 +194,7 @@ def test_sends_no_significant_developments_email_when_no_items_pass_threshold(co
 **Purpose**: Detects and collapses duplicate content items that cover the same development across sources.
 
 **Public methods**:
-- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as the tiebreaker; semantic dedup after scoring uses relevance.
+- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance.
 - `deduplicate_by_semantics(scored_items: list of ScoredItem)` → return: List of ScoredItem with is_duplicate and duplicate_of fields populated. Items covering the same core development are flagged, retaining the highest-relevance version as primary. Items with genuinely different angles are preserved as distinct.
 
 **Exercised by**: B028, B029, B030
@@ -372,14 +288,18 @@ def test_sends_no_significant_developments_email_when_no_items_pass_threshold(co
 
 # Constitution Validation
 
-The constitution provided contains only template placeholders with no specific principles defined. The following standard validations apply:
+The constitution contains only template placeholders with no specific principles defined. Standard validations applied:
 
-1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models → ingestion → transcription → scoring → briefing → monitoring).
+1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models -> ingestion -> transcription -> scoring -> briefing -> monitoring).
 2. **Public interface only**: All behaviors are defined against public handler entry points, public module functions, and observable outputs (emails, S3 objects, CloudWatch metrics). No behavior requires accessing internal implementation details.
-3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B007–B010: individual source ingestion) precede composed behaviors (B001: end-to-end delivery), allowing incremental red-green-refactor progression.
-4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue — each behavior defines what to test before the corresponding task is committed.
+3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B001-B005: briefing delivery) precede source-specific behaviors (B007-B010), which precede hardening behaviors (B013-B018).
+4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue.
 
 ⚠️ **Flag**: `deduplicate_by_url` in B028 runs before scoring but the spec (US5.S1) says "only the highest-relevance version appears" — URL dedup cannot use relevance scores. The interface definition notes this: URL dedup uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance. Tests should validate both stages separately.
+
+---
+
+**Current progress**: B001-B005 complete, B006 in RED phase. Next behavior to implement: B006 (pipeline run metadata recording). The behavior queue and public interfaces are stable and consistent with all spec artifacts.
 
 ## Guardrails (lessons from previous failures — follow these)
 

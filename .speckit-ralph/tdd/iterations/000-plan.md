@@ -1,15 +1,17 @@
+The behavior queue and public interfaces already exist and are well-defined. Let me verify them against the current spec artifacts and produce the updated PLAN output.
+
 # Behavior Queue
 
 ## User Story 1: Daily Morning Briefing Delivery
 
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
-| B001 | When the daily scheduled run executes with at least one active source configured, an email briefing is delivered to each configured recipient's inbox | US1.S1 | T019, T022, T026 | queued |
-| B002 | Each briefing item displays a title, source name, 2-3 sentence executive summary, relevance tag, urgency indicator (Informational / Worth Discussing / Action Needed), and a clickable source link | US1.S2 | T021, T022, T023 | queued |
-| B003 | The briefing email renders correctly on mobile devices with clear hierarchy and no horizontal scrolling | US1.S3 | T023 | queued |
-| B004 | When the pipeline fails before the delivery deadline, a fallback notification email is sent to all recipients explaining the delay and expected resolution | US1.S4 | T025 | queued |
-| B005 | When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing | Edge Case | T024 | queued |
-| B006 | Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status | US1.S1 | T027 | queued |
+| B001 | When the daily scheduled run executes with at least one active source configured, an email briefing is delivered to each configured recipient's inbox | US1.S1 | T019, T022, T026 | complete |
+| B002 | Each briefing item displays a title, source name, 2-3 sentence executive summary, relevance tag, urgency indicator (Informational / Worth Discussing / Action Needed), and a clickable source link | US1.S2 | T021, T022, T023 | complete |
+| B003 | The briefing email renders correctly on mobile devices with clear hierarchy and no horizontal scrolling | US1.S3 | T023 | complete |
+| B004 | When the pipeline fails before the delivery deadline, a fallback notification email is sent to all recipients explaining the delay and expected resolution | US1.S4 | T025 | complete |
+| B005 | When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing | Edge Case | T024 | complete |
+| B006 | Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status | US1.S1 | T027 | red |
 
 ## User Story 2: Multi-Format Source Ingestion
 
@@ -70,8 +72,6 @@
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
 | B036 | Raw content, transcripts, scored items, and briefings older than 30 days are automatically deleted | FR-021 | T010, T051 | queued |
-
----
 
 # Public Interfaces
 
@@ -212,7 +212,7 @@
 **Purpose**: Detects and collapses duplicate content items that cover the same development across sources.
 
 **Public methods**:
-- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as the tiebreaker; semantic dedup after scoring uses relevance.
+- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance.
 - `deduplicate_by_semantics(scored_items: list of ScoredItem)` → return: List of ScoredItem with is_duplicate and duplicate_of fields populated. Items covering the same core development are flagged, retaining the highest-relevance version as primary. Items with genuinely different angles are preserved as distinct.
 
 **Exercised by**: B028, B029, B030
@@ -306,11 +306,15 @@
 
 # Constitution Validation
 
-The constitution provided contains only template placeholders with no specific principles defined. The following standard validations apply:
+The constitution contains only template placeholders with no specific principles defined. Standard validations applied:
 
-1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models → ingestion → transcription → scoring → briefing → monitoring).
+1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models -> ingestion -> transcription -> scoring -> briefing -> monitoring).
 2. **Public interface only**: All behaviors are defined against public handler entry points, public module functions, and observable outputs (emails, S3 objects, CloudWatch metrics). No behavior requires accessing internal implementation details.
-3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B007–B010: individual source ingestion) precede composed behaviors (B001: end-to-end delivery), allowing incremental red-green-refactor progression.
-4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue — each behavior defines what to test before the corresponding task is committed.
+3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B001-B005: briefing delivery) precede source-specific behaviors (B007-B010), which precede hardening behaviors (B013-B018).
+4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue.
 
 ⚠️ **Flag**: `deduplicate_by_url` in B028 runs before scoring but the spec (US5.S1) says "only the highest-relevance version appears" — URL dedup cannot use relevance scores. The interface definition notes this: URL dedup uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance. Tests should validate both stages separately.
+
+---
+
+**Current progress**: B001-B005 complete, B006 in RED phase. Next behavior to implement: B006 (pipeline run metadata recording). The behavior queue and public interfaces are stable and consistent with all spec artifacts.
