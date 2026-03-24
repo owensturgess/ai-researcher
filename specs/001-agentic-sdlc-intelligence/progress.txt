@@ -1,0 +1,8 @@
+# Ralph Progress Log
+#
+# Append entries after each completed task:
+# - Task ID and description
+# - Decisions and rationale
+# - Files changed
+# - Tests run and results
+# - Blockers/notes
