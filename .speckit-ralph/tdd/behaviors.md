@@ -8,7 +8,7 @@
 | B002 | Each briefing item displays a title, source name, 2-3 sentence executive summary, relevance tag, urgency indicator (Informational / Worth Discussing / Action Needed), and a clickable source link | US1.S2 | T021, T022, T023 | complete |
 | B003 | The briefing email renders correctly on mobile devices with clear hierarchy and no horizontal scrolling | US1.S3 | T023 | complete |
 | B004 | When the pipeline fails before the delivery deadline, a fallback notification email is sent to all recipients explaining the delay and expected resolution | US1.S4 | T025 | complete |
-| B005 | When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing | Edge Case | T024 | queued |
+| B005 | When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing | Edge Case | T024 | complete |
 | B006 | Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status | US1.S1 | T027 | queued |
 
 ## User Story 2: Multi-Format Source Ingestion

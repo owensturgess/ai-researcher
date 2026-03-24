@@ -27,49 +27,8 @@ Do NOT include implementation code. Do NOT include explanations outside of code 
 
 ## Behavior Under Test
 
-Behavior B004: When the pipeline fails before the delivery deadline, a fallback notification email is sent to all recipients explaining the delay and expected resolution
-Linked tasks: T025
-
-## Previous Validation Feedback (MUST address these issues)
-
-
-Check #2 (Public interface only) — FAILED
-Check #3 (Survives refactor) — FAILED
-
-**Specific violation:**
-
-The test calls:
-```
-handler(event, context, config_dir=tmp_path)
-```
-
-But the documented public interface for `src/briefing/handler.py` is:
-```
-handler(event: dict, context: object) → return: dict
-```
-
-`config_dir` is **not a documented parameter** of the briefing handler's public interface. Passing it as a keyword argument means the test is coupled to an undocumented implementation detail about how the handler resolves its configuration directory.
-
-**Why this also fails Check #3:**
-If the handler is rewritten to source its config directory from an environment variable, from the `event` dict, or from a hard-coded Lambda path (`/var/task/config`), the test breaks — even though the observable behavior (sends two fallback emails) is completely preserved.
-
-**How to fix:**
-
-Option A — Inject via `event` (preferred, no interface change needed):
-```python
-event = {"pipeline_failed": True, "config_dir": str(tmp_path)}
-handler(event, context)
-```
-This keeps the call signature matching the public interface and makes config injection an observable input to the handler.
-
-Option B — Update the public interface definition to explicitly document `config_dir` as an optional keyword argument:
-```
-handler(event: dict, context: object, config_dir: str = DEFAULT_CONFIG_DIR) → return: dict
-```
-Then the test is calling a documented parameter and Check #2 is satisfied.
-
-Pick one option and apply it consistently. The fix to use a real `settings.yaml` file (avoiding the `load_settings` mock) is correct — only the injection mechanism needs to align with the public interface.
-```
+Behavior B005: When no items pass the relevance threshold, a "no significant developments" confirmation email is sent instead of an empty or missing briefing
+Linked tasks: T024
 
 ## Public Interfaces (from interfaces.md)
 
