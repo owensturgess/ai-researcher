@@ -25,62 +25,72 @@ Do NOT include test code. Do NOT include explanations outside of code comments.
 
 ## Failing Test (from RED step)
 
-It looks like write permissions to new files need your approval. Once you grant permission, here is the complete test file to write:
-
-**File**: `tests/briefing/test_template.py`
+The write requires your permission. Here's the complete test file to create at `tests/unit/test_briefing_mobile.py`:
 
 ```python
-# tests/briefing/test_template.py
+# tests/unit/test_briefing_mobile.py
 import os
+import re
+
 import pytest
 from jinja2 import Environment, FileSystemLoader
 
-TEMPLATE_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "src", "briefing", "templates"
-)
 
-
-def test_briefing_item_renders_all_required_fields():
-    """Each briefing item displays title, source name, executive summary,
-    relevance tag, urgency indicator, and a clickable source link."""
-    env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
+def test_briefing_email_constrains_width_to_prevent_horizontal_scrolling():
+    """The briefing email template renders with a max-width of 600px so mobile clients
+    display it without horizontal scrolling."""
+    template_dir = os.path.join(
+        os.path.dirname(__file__), "../../src/briefing/templates"
+    )
+    env = Environment(loader=FileSystemLoader(template_dir))
     template = env.get_template("briefing.html")
 
-    item = {
-        "title": "Claude 4 Supports Autonomous SDLC Pipelines",
-        "source_name": "Anthropic Blog",
-        "summary": (
-            "Anthropic released Claude 4 with enhanced tool-use capabilities. "
-            "The model supports multi-step agentic workflows out of the box. "
-            "Early benchmarks show significant gains in code generation tasks."
-        ),
-        "relevance_tag": "AI Models & Releases",
-        "urgency": "action_needed",
-        "original_url": "https://example.com/claude-4-announcement",
-    }
+    items = [
+        {
+            "title": "LLMs in Production: Lessons from Scale",
+            "source_name": "The Pragmatic Engineer",
+            "summary": (
+                "This article explores operational challenges of running LLMs at "
+                "scale in production environments. It covers cost management, latency "
+                "budgets, and graceful degradation patterns."
+            ),
+            "relevance_tag": "AI Engineering",
+            "urgency": "worth_discussing",
+            "original_url": "https://example.com/llms-production",
+        }
+    ]
 
     html = template.render(
-        items=[item],
+        items=items,
         briefing_date="2026-03-24",
-        pipeline_stats={"sources_scanned": 20, "items_scored": 42},
+        pipeline_stats={"sources_scanned": 15, "items_ingested": 42},
     )
 
-    assert "Claude 4 Supports Autonomous SDLC Pipelines" in html
-    assert "Anthropic Blog" in html
-    assert "Anthropic released Claude 4 with enhanced tool-use capabilities." in html
-    assert "AI Models &amp; Releases" in html or "AI Models & Releases" in html
-    assert "Action Needed" in html  # human-readable label, not snake_case "action_needed"
-    assert 'href="https://example.com/claude-4-announcement"' in html
+    # The outer container must declare max-width: 600px (with or without spaces)
+    # so email clients do not render a layout wider than a mobile viewport.
+    assert re.search(r"max-width\s*:\s*600px", html), (
+        "Expected 'max-width: 600px' in rendered HTML to prevent horizontal "
+        "scrolling on mobile devices"
+    )
+
+    # No element may declare a fixed pixel width wider than 600px, which would
+    # force horizontal scrolling regardless of the container constraint.
+    fixed_widths = re.findall(r"width\s*:\s*(\d+)px", html)
+    oversized = [int(w) for w in fixed_widths if int(w) > 600]
+    assert not oversized, (
+        f"Found fixed pixel widths exceeding 600px: {oversized}. "
+        "These will cause horizontal scrolling on mobile."
+    )
 ```
 
-**Why it fails (RED)**: `src/briefing/templates/briefing.html` doesn't exist yet — Jinja2 raises `TemplateNotFound: briefing.html`.
+**Why this test fails (RED)**: `src/briefing/templates/briefing.html` does not exist yet, so `env.get_template("briefing.html")` raises `TemplateNotFound`.
 
-**Key design choices**:
-- Tests the template directly (the public interface for B002 display concerns), not the handler
-- The `"Action Needed" in html` assertion is the non-trivial one — it verifies the template maps `urgency: "action_needed"` to a human-readable label rather than passing through snake_case
-- All 6 assertions form one logical outcome: "a briefing item block renders every required field correctly"
+**What it tests (observable behavior)**:
+- Renders the real Jinja2 template through its documented public contract (input: items list, briefing_date, pipeline_stats)
+- Asserts `max-width: 600px` is present — the standard email-safe constraint that prevents horizontal scrolling on mobile viewports
+- Asserts no inline `width: Npx` values exceed 600px — catches table columns or images that would overflow regardless of container constraints
 
-Please approve the file write and I'll create `tests/__init__.py`, `tests/briefing/__init__.py`, and `tests/briefing/test_template.py`.
+**No mocks needed** — the template is a local file (no system boundary to mock), and Jinja2 rendering is pure in-process.
 
 ## Existing Code (for context — extend or modify as needed)
 

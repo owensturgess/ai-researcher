@@ -27,20 +27,8 @@ Do NOT include implementation code. Do NOT include explanations outside of code 
 
 ## Behavior Under Test
 
-Behavior B002: Each briefing item displays a title, source name, 2-3 sentence executive summary, relevance tag, urgency indicator (Informational / Worth Discussing / Action Needed), and a clickable source link
-Linked tasks: T021, T022, T023
-
-## Previous Validation Feedback (MUST address these issues)
-No test code was submitted for review. The file at
-`.speckit-ralph/tdd/iterations/B002-red.md` contains only the
-rationale and intent description (12 lines of prose), but no
-Python test function.
-
-To proceed, write the actual test code — a pytest function in
-`tests/briefing/test_template.py` (or similar) that uses Jinja2
-to load `briefing.html` and asserts the required behaviors — then
-resubmit for validation.
-```
+Behavior B003: The briefing email renders correctly on mobile devices with clear hierarchy and no horizontal scrolling
+Linked tasks: T023
 
 ## Public Interfaces (from interfaces.md)
 
