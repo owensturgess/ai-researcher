@@ -25,72 +25,67 @@ Do NOT include test code. Do NOT include explanations outside of code comments.
 
 ## Failing Test (from RED step)
 
-The write requires your permission. Here's the complete test file to create at `tests/unit/test_briefing_mobile.py`:
+The file write was blocked. Here is the corrected test for B004, addressing both validation failures by using Option A (inject `config_dir` via `event`):
 
 ```python
-# tests/unit/test_briefing_mobile.py
+# tests/unit/test_briefing.py
+
+import sys
 import os
-import re
 
-import pytest
-from jinja2 import Environment, FileSystemLoader
+import yaml
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../src"))
+
+from briefing.handler import handler
 
 
-def test_briefing_email_constrains_width_to_prevent_horizontal_scrolling():
-    """The briefing email template renders with a max-width of 600px so mobile clients
-    display it without horizontal scrolling."""
-    template_dir = os.path.join(
-        os.path.dirname(__file__), "../../src/briefing/templates"
-    )
-    env = Environment(loader=FileSystemLoader(template_dir))
-    template = env.get_template("briefing.html")
+def test_fallback_notification_sent_to_all_recipients_on_pipeline_failure(tmp_path):
+    # Write a real settings.yaml — no internal config loader mocking
+    settings = {
+        "schedule": "0 7 * * *",
+        "relevance_threshold": 60,
+        "max_briefing_items": 10,
+        "budget_caps": {"daily_usd": 15.0},
+        "recipients": [
+            {"name": "Alice", "email": "alice@example.com", "timezone": "UTC"},
+            {"name": "Bob", "email": "bob@example.com", "timezone": "UTC"},
+        ],
+        "retention_days": 30,
+    }
+    (tmp_path / "settings.yaml").write_text(yaml.dump(settings))
 
-    items = [
-        {
-            "title": "LLMs in Production: Lessons from Scale",
-            "source_name": "The Pragmatic Engineer",
-            "summary": (
-                "This article explores operational challenges of running LLMs at "
-                "scale in production environments. It covers cost management, latency "
-                "budgets, and graceful degradation patterns."
-            ),
-            "relevance_tag": "AI Engineering",
-            "urgency": "worth_discussing",
-            "original_url": "https://example.com/llms-production",
-        }
-    ]
+    # Inject config_dir via event (Option A) — keeps call matching the public interface
+    event = {"pipeline_failed": True, "config_dir": str(tmp_path)}
+    context = MagicMock()
 
-    html = template.render(
-        items=items,
-        briefing_date="2026-03-24",
-        pipeline_stats={"sources_scanned": 15, "items_ingested": 42},
-    )
+    mock_ses = MagicMock()
+    mock_ses.send_email.return_value = {"MessageId": "fallback-001"}
+    mock_s3 = MagicMock()
 
-    # The outer container must declare max-width: 600px (with or without spaces)
-    # so email clients do not render a layout wider than a mobile viewport.
-    assert re.search(r"max-width\s*:\s*600px", html), (
-        "Expected 'max-width: 600px' in rendered HTML to prevent horizontal "
-        "scrolling on mobile devices"
-    )
+    def make_client(service_name, **kwargs):
+        if service_name == "ses":
+            return mock_ses
+        return mock_s3
 
-    # No element may declare a fixed pixel width wider than 600px, which would
-    # force horizontal scrolling regardless of the container constraint.
-    fixed_widths = re.findall(r"width\s*:\s*(\d+)px", html)
-    oversized = [int(w) for w in fixed_widths if int(w) > 600]
-    assert not oversized, (
-        f"Found fixed pixel widths exceeding 600px: {oversized}. "
-        "These will cause horizontal scrolling on mobile."
-    )
+    with patch("boto3.client", side_effect=make_client):
+        handler(event, context)
+
+    # Observable behavior: one fallback email sent per recipient
+    assert mock_ses.send_email.call_count == 2
+    sent_to = {
+        c.kwargs["Destination"]["ToAddresses"][0]
+        for c in mock_ses.send_email.call_args_list
+    }
+    assert sent_to == {"alice@example.com", "bob@example.com"}
 ```
 
-**Why this test fails (RED)**: `src/briefing/templates/briefing.html` does not exist yet, so `env.get_template("briefing.html")` raises `TemplateNotFound`.
+**What changed from the previous iteration:**
 
-**What it tests (observable behavior)**:
-- Renders the real Jinja2 template through its documented public contract (input: items list, briefing_date, pipeline_stats)
-- Asserts `max-width: 600px` is present — the standard email-safe constraint that prevents horizontal scrolling on mobile viewports
-- Asserts no inline `width: Npx` values exceed 600px — catches table columns or images that would overflow regardless of container constraints
-
-**No mocks needed** — the template is a local file (no system boundary to mock), and Jinja2 rendering is pure in-process.
+- **Check #2 fix**: Call signature now matches the public interface exactly — `handler(event, context)`. The `config_dir` is passed inside `event["config_dir"]` (Option A), not as an undocumented keyword argument.
+- **Check #3 fix**: The test no longer breaks if the handler is rewritten to source config from an env var or Lambda path, because `config_dir` is now an observable *input* to the handler (part of the event contract), not an implementation detail of how the handler finds its config.
+- **Retained from previous fix**: Real `settings.yaml` on disk — `load_settings` is not mocked; only `boto3.client` is mocked at the AWS boundary.
 
 ## Existing Code (for context — extend or modify as needed)
 

@@ -1,77 +1,34 @@
-# RED Step: Write Exactly One Failing Test
+# REFACTOR Step — Code Quality Improvement
 
-You are the **Test Writer** in a TDD loop. Your job is to write exactly ONE failing test for the behavior described below. The test must target observable behavior through the public interface only.
+You are a refactoring agent for a TDD-driven project. Your job is to improve code quality without changing behavior.
 
 ## Rules
 
-1. Write **exactly one test** — do not write multiple tests or test helpers.
-2. The test MUST target **observable behavior through the public interface** described in the interfaces section below.
-3. Do NOT access private/internal methods, attributes, or implementation details.
-4. Do NOT mock internal collaborators — only mock at system boundaries (external APIs, databases, filesystem, network).
-5. If the behavior requires external dependencies, mock them at the boundary.
-6. Use **behavior-based naming** — the test name should describe what the system does, not how.
-7. Use **one logical assertion** per test (multiple asserts on the same logical outcome are acceptable).
-8. The test must be **independent** — it must not depend on other tests or shared mutable state.
-9. The test MUST **fail** when run (there is no implementation yet).
-10. Follow the language and test framework conventions from the plan context below.
+1. **All tests must still pass** after your changes. Do not break any existing tests.
+2. **Do not change behavior** — refactoring is structural improvement only.
+3. **Do not modify test files** — tests define the expected behavior and must remain unchanged.
+4. **Do not add new features** — only improve existing code.
+5. **Preserve the public interface** described in the interfaces section.
 
-## Output Format
+## What to look for
 
-Output the complete test file content that should be written. Include:
-- The file path as a comment on the first line (e.g., `# tests/test_calculator.py`)
-- All necessary imports
-- The single test function/method
-- Any test-specific setup (fixtures, mocks at boundaries)
+- Duplicated code that can be extracted into shared helpers
+- Long functions that can be broken into smaller, focused functions
+- Unclear naming that can be improved for readability
+- Dead code or unused imports that can be removed
+- Overly complex conditionals that can be simplified
+- Missing error handling at system boundaries
+- Performance improvements that don't change behavior
 
-Do NOT include implementation code. Do NOT include explanations outside of code comments.
+## Current Implementation
 
-## Behavior Under Test
+(No implementation source code found)
 
-Behavior B004: When the pipeline fails before the delivery deadline, a fallback notification email is sent to all recipients explaining the delay and expected resolution
-Linked tasks: T025
+## Current Tests
 
-## Previous Validation Feedback (MUST address these issues)
+(No test files found)
 
-
-Check #2 (Public interface only) — FAILED
-Check #3 (Survives refactor) — FAILED
-
-**Specific violation:**
-
-The test calls:
-```
-handler(event, context, config_dir=tmp_path)
-```
-
-But the documented public interface for `src/briefing/handler.py` is:
-```
-handler(event: dict, context: object) → return: dict
-```
-
-`config_dir` is **not a documented parameter** of the briefing handler's public interface. Passing it as a keyword argument means the test is coupled to an undocumented implementation detail about how the handler resolves its configuration directory.
-
-**Why this also fails Check #3:**
-If the handler is rewritten to source its config directory from an environment variable, from the `event` dict, or from a hard-coded Lambda path (`/var/task/config`), the test breaks — even though the observable behavior (sends two fallback emails) is completely preserved.
-
-**How to fix:**
-
-Option A — Inject via `event` (preferred, no interface change needed):
-```python
-event = {"pipeline_failed": True, "config_dir": str(tmp_path)}
-handler(event, context)
-```
-This keeps the call signature matching the public interface and makes config injection an observable input to the handler.
-
-Option B — Update the public interface definition to explicitly document `config_dir` as an optional keyword argument:
-```
-handler(event: dict, context: object, config_dir: str = DEFAULT_CONFIG_DIR) → return: dict
-```
-Then the test is calling a documented parameter and Check #2 is satisfied.
-
-Pick one option and apply it consistently. The fix to use a real `settings.yaml` file (avoiding the `load_settings` mock) is correct — only the injection mechanism needs to align with the public interface.
-```
-
-## Public Interfaces (from interfaces.md)
+## Public Interfaces (DO NOT change signatures)
 
 # Public Interfaces
 
@@ -315,137 +272,7 @@ The constitution provided contains only template placeholders with no specific p
 
 ⚠️ **Flag**: `deduplicate_by_url` in B028 runs before scoring but the spec (US5.S1) says "only the highest-relevance version appears" — URL dedup cannot use relevance scores. The interface definition notes this: URL dedup uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance. Tests should validate both stages separately.
 
-## Existing Tests (for context — do not duplicate)
-
-(No existing tests found)
-
-## Plan Context (language, framework, project structure)
-
-# Implementation Plan: Agentic SDLC Daily Intelligence Briefing Agent
-
-**Branch**: `001-agentic-sdlc-intelligence` | **Date**: 2026-03-24 | **Spec**: [spec.md](./spec.md)
-**Input**: Feature specification from `/specs/001-agentic-sdlc-intelligence/spec.md`
-
-## Summary
-
-Build an automated daily intelligence pipeline that ingests content from RSS, web, X, YouTube, and podcasts — transcribing audio/video where necessary — scores each item for relevance against the company's agentic SDLC transformation goals using an LLM, generates executive summaries, and delivers a curated email briefing each morning. The system runs as a serverless pipeline on AWS using Lambda, S3, SQS, Transcribe, Bedrock (Claude), SES, and EventBridge.
-
-## Technical Context
-
-**Language/Version**: Python 3.12
-**Primary Dependencies**: boto3 (AWS SDK), feedparser (RSS), yt-dlp (YouTube audio), tweepy (X API), beautifulsoup4 (web scraping), jinja2 (email templates)
-**Storage**: Amazon S3 (raw content, transcripts, scored items, briefings — 30-day retention with lifecycle policy)
-**Testing**: pytest, moto (AWS mocking), pytest-cov
-**Target Platform**: AWS Lambda (serverless), single-region deployment
-**Project Type**: Serverless pipeline / scheduled automation
-**Performance Goals**: Full pipeline completes within 2 hours under normal conditions (completeness-first: delivery waits for all processing)
-**Constraints**: Daily operational budget ~$5-15/day ($150-450/month); must handle 50-200 content items per daily run; 30-day data retention
-**Scale/Scope**: 3-4 recipients, 20-50 configured sources, 5-10 briefing items per day
-
-## Constitution Check
-
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
-
-The project constitution has not been customized (still contains template placeholders). No specific gates are defined to evaluate against. Proceeding with standard engineering best practices:
-
-- **Simplicity**: Single-purpose Lambda functions for each pipeline stage, no over-abstraction
-- **Testability**: Each pipeline stage independently testable with mocked AWS services
-- **Observability**: CloudWatch metrics and structured logging throughout
-- **IaC**: All infrastructure defined in CDK (Python) — no manual resource creation
-
-**Post-Phase 1 re-check**: Design adheres to the above principles. No violations detected.
-
-## Project Structure
-
-### Documentation (this feature)
-
-```text
-specs/001-agentic-sdlc-intelligence/
-├── plan.md              # This file
-├── research.md          # Phase 0 output
-├── data-model.md        # Phase 1 output
-├── quickstart.md        # Phase 1 output
-├── contracts/           # Phase 1 output
-│   └── briefing-email.md
-└── tasks.md             # Phase 2 output (created by /speckit.tasks)
-```
-
-### Source Code (repository root)
-
-```text
-src/
-├── ingestion/
-│   ├── __init__.py
-│   ├── handler.py           # Lambda handler: orchestrates source ingestion
-│   ├── sources/
-│   │   ├── __init__.py
-│   │   ├── rss.py           # RSS/Atom feed ingestion
-│   │   ├── web.py           # Web page scraping
-│   │   ├── x_api.py         # X (Twitter) API ingestion
-│   │   ├── youtube.py       # YouTube API + transcript retrieval
-│   │   └── podcast.py       # Podcast RSS + audio download
-│   └── config.py            # Source configuration loader
-├── transcription/
-│   ├── __init__.py
-│   └── handler.py           # Lambda handler: AWS Transcribe worker
-├── scoring/
-│   ├── __init__.py
-│   ├── handler.py           # Lambda handler: relevance scoring via Bedrock
-│   ├── deduplication.py     # Content deduplication logic
-│   └── prompts/
-│       └── relevance.txt    # Configurable scoring context prompt
-├── briefing/
-│   ├── __init__.py
-│   ├── handler.py           # Lambda handler: briefing assembly + SES delivery
-│   └── templates/
-│       └── briefing.html    # Jinja2 email template (mobile-friendly)
-├── monitoring/
-│   ├── __init__.py
-│   └── handler.py           # Lambda handler: cost aggregation + alerting
-└── shared/
-    ├── __init__.py
-    ├── models.py            # Shared data models (Source, ContentItem, ScoredItem, etc.)
-    ├── s3.py                # S3 read/write helpers
-    └── config.py            # Global configuration loader
-
-config/
-├── sources.yaml             # Source list (add/remove without code changes)
-├── context-prompt.txt       # Relevance scoring context (editable without code changes)
-└── settings.yaml            # Thresholds, budget caps, recipient list, schedule
-
-infra/
-├── app.py                   # CDK app entry point
-├── stacks/
-│   ├── pipeline_stack.py    # Main pipeline stack (Lambdas, S3, SQS, EventBridge)
-│   ├── delivery_stack.py    # SES configuration
-│   └── monitoring_stack.py  # CloudWatch dashboards, alarms, cost alerts
-└── requirements.txt         # CDK dependencies
-
-tests/
-├── unit/
-│   ├── test_rss.py
-│   ├── test_web.py
-│   ├── test_x_api.py
-│   ├── test_youtube.py
-│   ├── test_podcast.py
-│   ├── test_scoring.py
-│   ├── test_deduplication.py
-│   ├── test_briefing.py
-│   └── test_monitoring.py
-├── integration/
-│   ├── test_ingestion_pipeline.py
-│   ├── test_transcription_pipeline.py
-│   ├── test_scoring_pipeline.py
-│   └── test_end_to_end.py
-└── fixtures/
-    ├── sample_rss.xml
-    ├── sample_content.json
-    └── sample_scored.json
-```
-
-**Structure Decision**: Single-project serverless pipeline. Each pipeline stage is a separate Lambda function with its own handler module, sharing common models and utilities via `src/shared/`. Infrastructure is defined in CDK stacks under `infra/`. Configuration files under `config/` are editable without code changes. This keeps the codebase flat and navigable while maintaining clear separation of pipeline stages.
-
-## Guardrails (lessons from previous failures — follow these)
+## Guardrails
 
 ### Sign: Read Before Writing
 - **Trigger**: Before modifying any file
@@ -457,3 +284,21 @@ tests/
 - **Trigger**: Before committing changes
 - **Instruction**: Run required tests and verify outputs
 - **Added after**: Core principle
+
+## Output Format
+
+For each file you refactor, output:
+
+```
+# Refactored: <file_path>
+
+<complete refactored file content>
+```
+
+If no refactoring is needed, output:
+
+```
+# No Refactoring Needed
+
+The code is clean and well-structured. No changes recommended.
+```
