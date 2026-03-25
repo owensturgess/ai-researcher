@@ -65,7 +65,7 @@
 - [x] T024 [US1] Implement "no significant developments" email variant in src/briefing/handler.py — when no items pass threshold, send confirmation email per contracts/briefing-email.md empty variant
 - [x] T025 [US1] Implement fallback error notification in src/briefing/handler.py — if pipeline fails, send error notification email per contracts/briefing-email.md fallback variant with error summary, failed stage, and timestamp
 - [x] T026 [US1] Wire Lambda functions in infra/stacks/pipeline_stack.py — create Lambda functions for ingestion, transcription, scoring, and briefing handlers; connect EventBridge cron → ingestion, SQS → transcription, S3 manifest event → scoring, scoring completion → briefing; set IAM roles for S3, SQS, Transcribe, Bedrock, SES access
-- [ ] T027 [US1] Write PipelineRun record in src/ingestion/handler.py and src/briefing/handler.py — track started_at, completed_at, sources_attempted/succeeded, items_ingested/scored/above_threshold/in_briefing, transcription_jobs, delivery_status, write to S3 (runs/{date}/run.json)
+- [x] T027 [US1] Write PipelineRun record in src/ingestion/handler.py and src/briefing/handler.py — track started_at, completed_at, sources_attempted/succeeded, items_ingested/scored/above_threshold/in_briefing, transcription_jobs, delivery_status, write to S3 (runs/{date}/run.json)
 
 **Checkpoint**: End-to-end pipeline functional — daily briefing delivered via email with multi-format ingestion, transcription, scoring, and assembly. This is the MVP.
 

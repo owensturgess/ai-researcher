@@ -41,17 +41,111 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-The write needs your approval — please allow it when prompted. Once the file is written:
+# tests/unit/test_pipeline_run_metadata.py
+# tests/unit/test_pipeline_run_metadata.py
+import json
+import textwrap
+from unittest.mock import patch, MagicMock
 
-```
-FILE: tests/unit/test_rss_ingestion.py
-```
+import boto3
+import pytest
+from moto import mock_aws
 
-The test:
-- Mocks `feedparser.parse` at the system boundary (external HTTP call)
-- Creates a `Source` with `type="rss"` and calls the public `ingest(source, since)` interface
-- Asserts one `ContentItem` is returned with the correct `title`, `source_id`, `original_url`, and `published_date >= since`
-- Will fail immediately since `src/ingestion/sources/rss.py` does not exist yet
+from src.ingestion.handler import handler
+
+
+@mock_aws
+def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_counts(
+    monkeypatch, tmp_path
+):
+    """
+    After the ingestion handler runs with two active sources (RSS and web),
+    a PipelineRun record is written to S3 at pipeline-runs/{date}/run.json
+    containing sources_attempted == 2, sources_succeeded == 2,
+    items_ingested, transcription_jobs, and delivery_status.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Write a real sources.yaml at the filesystem boundary (not mocking load_sources)
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-rss-1
+            name: AI News RSS
+            type: rss
+            url: https://example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-web-1
+            name: Tech Blog
+            type: web
+            url: https://example.com/blog
+            category: ai
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+
+    # Set up AWS services at the AWS boundary
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
+
+    # Mock feedparser.parse at the external library / network boundary (RSS)
+    fake_rss_feed = MagicMock()
+    fake_rss_feed.bozo = False
+    fake_rss_feed.entries = [
+        MagicMock(
+            title="AI Breakthrough",
+            link="https://example.com/article-1",
+            published_parsed=(2026, 3, 24, 10, 0, 0, 0, 0, 0),
+            summary="An AI breakthrough was announced.",
+        ),
+        MagicMock(
+            title="LLM Update",
+            link="https://example.com/article-2",
+            published_parsed=(2026, 3, 24, 11, 0, 0, 0, 0, 0),
+            summary="A new LLM update was released.",
+        ),
+    ]
+
+    # Mock urllib.request.urlopen at the network boundary (web page fetching)
+    fake_web_html = b"""<html><body>
+      <article>
+        <h1>Tech Post</h1>
+        <time datetime="2026-03-24">March 24, 2026</time>
+        <p>AI developments continue.</p>
+      </article>
+    </body></html>"""
+    fake_http_response = MagicMock()
+    fake_http_response.read.return_value = fake_web_html
+    fake_http_response.__enter__ = lambda s: s
+    fake_http_response.__exit__ = MagicMock(return_value=False)
+
+    with (
+        patch("feedparser.parse", return_value=fake_rss_feed),
+        patch("urllib.request.urlopen", return_value=fake_http_response),
+    ):
+        handler({}, None)
+
+    # PipelineRun record must be written to S3 with correct metadata fields
+    run_key = "pipeline-runs/2026-03-24/run.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=run_key)
+    run_data = json.loads(response["Body"].read())
+
+    assert run_data["sources_attempted"] == 2
+    assert run_data["sources_succeeded"] == 2
+    assert "items_ingested" in run_data
+    assert "transcription_jobs" in run_data
+    assert "delivery_status" in run_data
 
 ## Public Interfaces (from interfaces.md)
 
@@ -313,3 +407,9 @@ The constitution contains only template placeholders with no specific principles
 - **Trigger**: Before committing changes
 - **Instruction**: Run required tests and verify outputs
 - **Added after**: Core principle
+
+
+### Sign: Missing sys.path and package stubs cause patch ImportError
+- **Category**: RED-FAILURE
+- **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
+- **Added after**: B006 at 2026-03-25T02:04:10Z

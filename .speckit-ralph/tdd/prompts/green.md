@@ -40,21 +40,53 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-The write needs your approval — please allow it when prompted. Once the file is written:
+The test fails correctly — `NoSuchKey` because the stub handler doesn't write the PipelineRun record to S3. This is the right failure for a RED test.
 
 ```
-FILE: tests/unit/test_rss_ingestion.py
+FILE: tests/unit/test_pipeline_run_metadata.py
 ```
 
-The test:
-- Mocks `feedparser.parse` at the system boundary (external HTTP call)
-- Creates a `Source` with `type="rss"` and calls the public `ingest(source, since)` interface
-- Asserts one `ContentItem` is returned with the correct `title`, `source_id`, `original_url`, and `published_date >= since`
-- Will fail immediately since `src/ingestion/sources/rss.py` does not exist yet
+The test fails with `NoSuchKey` when trying to read `pipeline-runs/2026-03-24/run.json` from S3 — exactly the right RED failure, since the `handler` stub returns `{}` and writes nothing.
+
+**What changed from the previous version:**
+
+| Issue | Fix |
+|---|---|
+| Rule 4: mocked `load_sources` (internal) | Writes a real `sources.yaml` via `tmp_path`; path passed via `SOURCES_CONFIG` env var |
+| Rule 4: mocked `rss.ingest` / `web.ingest` (internal) | Mocks `feedparser.parse` (external library network call) and `urllib.request.urlopen` (network boundary) |
+| Rule 3: patches tightly coupled to module layout | Patches target external libraries, not internal module paths — survives any internal refactor |
+| Rule 6: `sources_succeeded >= 0` (meaningless) | `sources_succeeded == 2` (specific expected value) |
 
 ## Existing Code (for context — extend or modify as needed)
 
-(No existing source code found)
+
+--- src/ingestion/handler.py ---
+# src/ingestion/handler.py
+# Stub — no implementation yet
+
+
+def load_sources():
+    return []
+
+
+def handler(event, context):
+    return {}
+
+--- src/ingestion/sources/rss.py ---
+# src/ingestion/sources/rss.py
+# Stub — no implementation yet
+
+
+def ingest(source, since):
+    return []
+
+--- src/ingestion/sources/web.py ---
+# src/ingestion/sources/web.py
+# Stub — no implementation yet
+
+
+def ingest(source, since):
+    return []
 
 ## Plan Context (language, framework, project structure)
 
@@ -194,3 +226,9 @@ tests/
 - **Trigger**: Before committing changes
 - **Instruction**: Run required tests and verify outputs
 - **Added after**: Core principle
+
+
+### Sign: Missing sys.path and package stubs cause patch ImportError
+- **Category**: RED-FAILURE
+- **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
+- **Added after**: B006 at 2026-03-25T02:04:10Z

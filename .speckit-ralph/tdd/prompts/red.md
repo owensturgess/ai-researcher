@@ -43,11 +43,40 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B007: Given a configured source list with RSS/web entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from RSS/web sources
-Linked tasks: T014, T015, T019
+Behavior B006: Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status
+Linked tasks: T027
 
 ## Previous Validation Feedback (MUST address these issues)
-There is no test code to validate. The RED phase for B007 did not complete — the agent halted with a permission request ("The file write needs your permission...") and the file `tests/unit/test_rss_ingestion.py` was never written. Re-run the RED phase and approve the file write when prompted, then re-submit the test file for validation.
+
+
+**Rule 4 violated — Mocks internal collaborators instead of system boundaries**
+
+The test patches three internal project functions:
+
+```python
+patch("src.ingestion.handler.load_sources", return_value=fake_sources),
+patch("src.ingestion.sources.rss.ingest", return_value=fake_rss_items),
+patch("src.ingestion.sources.web.ingest", return_value=fake_web_items),
+```
+
+`load_sources`, `rss.ingest`, and `web.ingest` are all functions **within this project**. Even though they are listed as public interfaces of their own modules, they are internal collaborators to `handler` — not external system boundaries. The checklist rule is clear: "REJECTS if test mocks internal collaborators (classes/functions within the project)."
+
+The correct mocking boundary is:
+- For `load_sources`: mock the **filesystem** (provide a real or fixture `sources.yaml` file, or mock the `open()` / `yaml.safe_load()` call at the I/O boundary).
+- For `rss.ingest` / `web.ingest`: mock the **HTTP layer** (use `responses`, `httpretty`, or `unittest.mock` on `urllib.request.urlopen` / `requests.get`) so that the actual ingest code runs against a faked HTTP response rather than bypassing the ingest logic entirely.
+
+**Rule 3 violated — Test would not survive internal refactoring**
+
+The patch paths `"src.ingestion.sources.rss.ingest"` and `"src.ingestion.sources.web.ingest"` are tightly coupled to the current module layout. If `handler.py` were refactored to call a unified dispatcher, inline a source adapter, or reorganize sub-packages, these patches would break even though the public `handler()` contract is unchanged.
+
+**How to fix both violations:**
+1. Replace `patch("src.ingestion.handler.load_sources", ...)` with a real or temp `sources.yaml` fixture read from disk (mock `open` at the filesystem boundary if needed).
+2. Replace `patch("src.ingestion.sources.rss.ingest", ...)` and `patch("src.ingestion.sources.web.ingest", ...)` with HTTP-level mocks (e.g., `responses.add(...)`) so actual ingest logic runs but no real network call is made.
+3. Keep `@mock_aws` for S3 and SQS — those are correct boundary mocks.
+
+**Minor: Rule 6 weakness (not a FAIL on its own)**
+
+`assert run_data["sources_succeeded"] >= 0` passes for any non-negative value, including 0, and provides no real behavioral signal. Consider asserting the specific expected count (`== 2`) to make the assertion meaningful.
 ```
 
 ## Public Interfaces (from interfaces.md)
@@ -300,7 +329,89 @@ The constitution contains only template placeholders with no specific principles
 
 ## Existing Tests (for context — do not duplicate)
 
-(No existing tests found)
+
+--- tests/unit/test_pipeline_run_metadata.py ---
+# tests/unit/test_pipeline_run_metadata.py
+import json
+
+import boto3
+import pytest
+from moto import mock_aws
+from unittest.mock import patch, MagicMock
+
+from src.ingestion.handler import handler
+
+
+@mock_aws
+def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_counts(
+    monkeypatch,
+):
+    """
+    After the ingestion handler runs, a PipelineRun record is written to S3
+    at pipeline-runs/{date}/run.json containing sources_attempted,
+    sources_succeeded, items_ingested, transcription_jobs, and delivery_status.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Set up mock S3 bucket
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    # Set up mock SQS queue (for transcription enqueueing)
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
+
+    # Two active sources: one RSS, one web
+    fake_sources = [
+        MagicMock(
+            id="src-rss-1",
+            name="AI News RSS",
+            type="rss",
+            url="https://example.com/feed.xml",
+            active=True,
+            priority=1,
+        ),
+        MagicMock(
+            id="src-web-1",
+            name="Tech Blog",
+            type="web",
+            url="https://example.com/blog",
+            active=True,
+            priority=2,
+        ),
+    ]
+
+    # RSS source returns 2 text items, web source returns 1 audio item (needs transcription)
+    fake_rss_items = [
+        MagicMock(id="item-001", content_format="text", source_id="src-rss-1"),
+        MagicMock(id="item-002", content_format="text", source_id="src-rss-1"),
+    ]
+    fake_web_items = [
+        MagicMock(id="item-003", content_format="audio", source_id="src-web-1"),
+    ]
+
+    with (
+        patch("src.ingestion.handler.load_sources", return_value=fake_sources),
+        patch("src.ingestion.sources.rss.ingest", return_value=fake_rss_items),
+        patch("src.ingestion.sources.web.ingest", return_value=fake_web_items),
+    ):
+        handler({}, None)
+
+    # Assert PipelineRun record was written to S3
+    run_key = "pipeline-runs/2026-03-24/run.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=run_key)
+    run_data = json.loads(response["Body"].read())
+
+    assert run_data["sources_attempted"] == 2
+    assert run_data["sources_succeeded"] >= 0
+    assert run_data["items_ingested"] == 3
+    assert run_data["transcription_jobs"] == 1
+    assert "delivery_status" in run_data
 
 ## Plan Context (language, framework, project structure)
 
@@ -440,3 +551,9 @@ tests/
 - **Trigger**: Before committing changes
 - **Instruction**: Run required tests and verify outputs
 - **Added after**: Core principle
+
+
+### Sign: Missing sys.path and package stubs cause patch ImportError
+- **Category**: RED-FAILURE
+- **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
+- **Added after**: B006 at 2026-03-25T02:04:10Z
