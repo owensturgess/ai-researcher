@@ -1,0 +1,17 @@
+models:
+  planner: opus
+  test_writer: sonnet
+  implementer: sonnet
+  validator: sonnet
+  refactorer: opus
+  progress: haiku
+
+loop:
+  max_iterations: 20
+  max_retries_per_phase: 3
+  refactor_every_n_cycles: 3
+  auto_commit: true
+
+test:
+  command: "pytest"        # or "npm test", "go test ./...", etc.
+  timeout: 120
