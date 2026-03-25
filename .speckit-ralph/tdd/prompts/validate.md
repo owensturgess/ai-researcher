@@ -41,54 +41,94 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_source_config_new_entry.py
-# tests/unit/test_source_config_new_entry.py
+# tests/unit/test_source_removal_stops_ingestion.py
+# tests/unit/test_source_removal_stops_ingestion.py
+#
+# Behavior B024: Given a source is removed from the configuration file,
+# content from that source is no longer ingested on the next run.
+#
+# This test verifies that the pipeline run record written to S3 contains an
+# explicit list of source IDs that were attempted (source_ids_attempted), and
+# that the removed source's ID is absent from that list while the remaining
+# source's ID is present.  The handler currently writes only counts
+# (sources_attempted, sources_succeeded) — not an ID list — so this test fails
+# until source_ids_attempted is added to the run record.
+import json
 import textwrap
+from unittest.mock import patch, MagicMock
 
-import pytest
+import boto3
+from moto import mock_aws
 
-from src.ingestion.config import load_sources
+from src.ingestion.handler import handler
 
 
-def test_new_source_entry_in_config_file_is_included_in_loaded_sources(tmp_path):
+@mock_aws
+def test_removed_source_id_is_absent_from_run_record_source_id_list(
+    monkeypatch, tmp_path
+):
     """
-    Given a sources.yaml with an existing source and a newly added source entry
-    (name, type, URL, and optional category), when load_sources() is called,
-    the new source is present in the returned list — confirming it would be
-    included in the next daily pipeline run.
+    Given a config file that contains only src-remaining-001 (src-removed-002
+    was previously active but has been removed from the YAML), when the
+    ingestion handler runs, the pipeline run record written to S3 includes a
+    source_ids_attempted list that contains src-remaining-001 and does NOT
+    contain src-removed-002 — giving operators an explicit record of which
+    sources participated in each run.
     """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Config after removal: only src-remaining-001 is present
     sources_yaml = textwrap.dedent("""\
         sources:
-          - id: src-existing-001
-            name: Existing AI News
+          - id: src-remaining-001
+            name: Remaining AI Feed
             type: rss
-            url: https://existing.example.com/feed.xml
+            url: https://remaining.example.com/feed.xml
             category: ai
             active: true
             priority: 1
-          - id: src-new-002
-            name: New Source Added by User
-            type: web
-            url: https://new-source.example.com/articles
-            category: research
-            active: true
-            priority: 2
     """)
     config_file = tmp_path / "sources.yaml"
     config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
 
-    sources = load_sources(str(config_file))
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
 
-    source_ids = [s.id for s in sources]
-    assert "src-new-002" in source_ids, (
-        "Newly added source 'src-new-002' was not returned by load_sources()"
+    fake_feed = MagicMock()
+    fake_feed.bozo = False
+    fake_feed.entries = []
+
+    with patch("feedparser.parse", return_value=fake_feed):
+        handler({}, None)
+
+    # Read the pipeline run record written to S3
+    response = s3.get_object(
+        Bucket="test-pipeline-bucket",
+        Key="pipeline-runs/2026-03-24/run.json",
+    )
+    run_data = json.loads(response["Body"].read())
+
+    # The run record must include an explicit list of source IDs attempted
+    assert "source_ids_attempted" in run_data, (
+        "pipeline run record missing 'source_ids_attempted' field — "
+        "operators cannot verify which sources ran vs. which were removed"
     )
 
-    new_source = next(s for s in sources if s.id == "src-new-002")
-    assert new_source.name == "New Source Added by User"
-    assert new_source.type == "web"
-    assert new_source.url == "https://new-source.example.com/articles"
-    assert new_source.category == "research"
+    source_ids = run_data["source_ids_attempted"]
+    assert "src-remaining-001" in source_ids, (
+        f"src-remaining-001 should be in source_ids_attempted but got: {source_ids}"
+    )
+    assert "src-removed-002" not in source_ids, (
+        f"src-removed-002 must not appear in source_ids_attempted after removal, got: {source_ids}"
+    )
 
 ## Public Interfaces (from interfaces.md)
 
@@ -362,3 +402,9 @@ The constitution contains only template placeholders with no specific principles
 - **Category**: GREEN-FAILURE
 - **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
 - **Added after**: B009 at 2026-03-25T02:58:00Z
+
+
+### Sign: B024 behavior A already implemented — RED phase produces GREEN test
+- **Category**: RED-FAILURE
+- **Detail**: The source-removal behavior (B024 Behavior A) is already covered by the existing `handler.py` implementation: `load_sources()` reads only from the active `SOURCES_CONFIG` file, so any source absent from YAML is never attempted. The corrected single-assertion RED test (`sources_attempted == 1`, no S3 keys under `src-removed-002/`, at least one key under `src-remaining-001/`) passes immediately without new implementation. When a behavior is already implemented by prior GREEN phases, the RED test will be green from the start — treat this as "behavior pre-implemented" and advance directly to VALIDATE.
+- **Added after**: B024 at 2026-03-25T04:22:49Z

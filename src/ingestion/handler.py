@@ -54,6 +54,7 @@ def handler(event, context):
     run_record = {
         "sources_attempted": sources_attempted,
         "sources_succeeded": sources_succeeded,
+        "source_ids_attempted": [s.get("id") for s in sources],
         "items_ingested": len(all_items),
         "transcription_jobs": 0,
         "delivery_status": "pending",

@@ -40,14 +40,46 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
+Test fails as expected — `source_ids_attempted` is absent from the current run record.
+
 ```
-FILE: tests/unit/test_source_config_new_entry.py
+FILE: tests/unit/test_source_removal_stops_ingestion.py
 ```
 
-The test calls `load_sources(config_path)` from `src/ingestion/config.py` (which doesn't exist yet) with a YAML file containing a newly added source entry, then asserts the new source appears in the returned list with the correct `name`, `type`, `url`, and `category`. It will fail immediately with `ModuleNotFoundError` until the implementation is written.
+The test fails with:
+```
+AssertionError: pipeline run record missing 'source_ids_attempted' field
+assert 'source_ids_attempted' in {'delivery_status': 'pending', 'items_ingested': 0, 'sources_attempted': 1, ...}
+```
+
+The handler currently writes only count fields (`sources_attempted`, `sources_succeeded`, etc.) — no explicit list of source IDs. The test requires adding `source_ids_attempted` to the S3 pipeline run record, which gives operators a verifiable record of exactly which sources participated in each run (and implicitly proves removed sources are excluded by ID, not just by count).
 
 ## Existing Code (for context — extend or modify as needed)
 
+
+--- src/ingestion/config.py ---
+# src/ingestion/config.py
+import yaml
+
+from src.shared.models import Source
+
+
+def load_sources(config_path):
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return [
+        Source(
+            id=s["id"],
+            name=s["name"],
+            type=s["type"],
+            url=s["url"],
+            category=s.get("category", ""),
+            active=s.get("active", True),
+            priority=s.get("priority", 1),
+        )
+        for s in config.get("sources", [])
+        if s.get("active", True)
+    ]
 
 --- src/ingestion/handler.py ---
 # src/ingestion/handler.py
@@ -722,3 +754,9 @@ tests/
 - **Category**: GREEN-FAILURE
 - **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
 - **Added after**: B009 at 2026-03-25T02:58:00Z
+
+
+### Sign: B024 behavior A already implemented — RED phase produces GREEN test
+- **Category**: RED-FAILURE
+- **Detail**: The source-removal behavior (B024 Behavior A) is already covered by the existing `handler.py` implementation: `load_sources()` reads only from the active `SOURCES_CONFIG` file, so any source absent from YAML is never attempted. The corrected single-assertion RED test (`sources_attempted == 1`, no S3 keys under `src-removed-002/`, at least one key under `src-remaining-001/`) passes immediately without new implementation. When a behavior is already implemented by prior GREEN phases, the RED test will be green from the start — treat this as "behavior pre-implemented" and advance directly to VALIDATE.
+- **Added after**: B024 at 2026-03-25T04:22:49Z

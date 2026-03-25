@@ -51,7 +51,7 @@
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Implement source configuration loader in src/ingestion/config.py — parse sources.yaml, filter active sources, return typed Source objects
+- [x] T013 [US1] Implement source configuration loader in src/ingestion/config.py — parse sources.yaml, filter active sources, return typed Source objects
 - [x] T014 [P] [US1] Implement RSS/Atom feed ingestion in src/ingestion/sources/rss.py — use feedparser to retrieve entries published in last 24 hours, extract title, URL, published date, full text, return list of ContentItem
 - [x] T015 [P] [US1] Implement web page scraping in src/ingestion/sources/web.py — use requests + beautifulsoup4 to fetch and extract article text, handle HTML cleanup, return ContentItem
 - [x] T016 [P] [US1] Implement X (Twitter) API ingestion in src/ingestion/sources/x_api.py — use tweepy to retrieve recent tweets from configured accounts/searches (last 24 hours), handle rate limits, return list of ContentItem
