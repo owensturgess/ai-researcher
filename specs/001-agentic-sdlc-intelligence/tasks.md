@@ -164,7 +164,7 @@
 - [ ] T049 [P] Validate end-to-end pipeline with real sources — run full pipeline against production source list, verify email quality, scoring calibration, transcription accuracy
 - [ ] T050 [P] Test email rendering across target clients — verify briefing HTML renders correctly on iOS Mail, Gmail (web + mobile), Outlook (desktop + web) per contracts/briefing-email.md
 - [ ] T051 Add 30-day S3 lifecycle policy validation — verify lifecycle rules are applied to all prefixes (raw/, transcripts/, scored/, briefings/, runs/), test that objects are expired after 30 days
-- [ ] T052 [P] Add consecutive source failure tracking in src/ingestion/handler.py — track per-source failure count across runs (store in S3), log warning after 3 consecutive failures for the same source per edge case spec
+- [x] T052 [P] Add consecutive source failure tracking in src/ingestion/handler.py — track per-source failure count across runs (store in S3), log warning after 3 consecutive failures for the same source per edge case spec
 - [ ] T053 Run quickstart.md validation — follow quickstart.md step by step on a clean environment to verify setup instructions are complete and accurate
 - [ ] T054 Security review — verify API keys and credentials are stored in AWS Secrets Manager or environment variables (not in config files), verify SES sender is properly authenticated, verify Lambda IAM roles follow least-privilege principle
 

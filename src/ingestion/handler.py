@@ -12,6 +12,48 @@ logger = logging.getLogger(__name__)
 
 _INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
+_FAILURE_PREFIX = "source-failures/"
+
+
+def _failure_key(source_id):
+    return f"{_FAILURE_PREFIX}{source_id}.json"
+
+
+def track_source_failure(source_id, date, succeeded):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+    key = _failure_key(source_id)
+
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read())
+    except Exception:
+        data = {"consecutive_failures": 0}
+
+    if succeeded:
+        data["consecutive_failures"] = 0
+    else:
+        data["consecutive_failures"] = data.get("consecutive_failures", 0) + 1
+
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(data), ContentType="application/json")
+
+
+def get_failing_sources(threshold=3):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+
+    paginator = s3.get_paginator("list_objects_v2")
+    result = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=_FAILURE_PREFIX):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            source_id = key[len(_FAILURE_PREFIX):].removesuffix(".json")
+            data = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+            count = data.get("consecutive_failures", 0)
+            if count >= threshold:
+                result.append((source_id, count))
+    return result
+
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")

@@ -40,11 +40,17 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected (RED). The handler publishes no metrics at all into the `AgenticSDLCIntel` namespace currently — it doesn't aggregate 7-day rolling delivery reliability or average cost per run.
+Test fails at import — correct RED state.
 
 ```
-FILE: tests/unit/test_delivery_reliability_metrics.py
+FILE: tests/unit/test_consecutive_source_failure_tracking.py
 ```
+
+The test imports `get_failing_sources` and `track_source_failure` from `src.ingestion.handler`, which don't exist yet. The `ImportError` confirms a valid RED state. The test exercises the full observable contract for B034:
+
+1. `track_source_failure(source_id, date, succeeded=False)` increments consecutive failure count for a source
+2. `track_source_failure(source_id, date, succeeded=True)` resets the count on recovery
+3. `get_failing_sources(threshold=3)` returns `(source_id, count)` tuples where count ≥ threshold — and excludes sources that have recovered
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -684,10 +690,25 @@ def deduplicate_by_semantics(scored_items):
 import json
 import logging
 import os
+from datetime import date, timedelta
 
 import boto3
 
 logger = logging.getLogger(__name__)
+
+
+def _load_rolling_runs(s3, bucket, run_date_str, days=7):
+    """Load up to `days` pipeline run records ending on run_date_str (inclusive)."""
+    end = date.fromisoformat(run_date_str)
+    runs = []
+    for i in range(days):
+        d = (end - timedelta(days=days - 1 - i)).isoformat()
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=f"pipeline-runs/{d}/run.json")
+            runs.append(json.loads(obj["Body"].read()))
+        except Exception:
+            pass
+    return runs
 
 
 def handler(event: dict, context: object) -> dict:
@@ -725,6 +746,19 @@ def handler(event: dict, context: object) -> dict:
             {"MetricName": "EstimatedCostUSD", "Value": estimated_cost_usd, "Unit": "None"},
         ],
     )
+
+    rolling_runs = _load_rolling_runs(s3, bucket, run_date)
+    if rolling_runs:
+        delivered = sum(1 for r in rolling_runs if r.get("delivery_status") == "delivered")
+        reliability_pct = delivered / len(rolling_runs) * 100
+        avg_cost = sum(r.get("estimated_cost_usd", 0.0) for r in rolling_runs) / len(rolling_runs)
+        cloudwatch.put_metric_data(
+            Namespace="AgenticSDLCIntel",
+            MetricData=[
+                {"MetricName": "DeliveryReliabilityPct", "Value": reliability_pct, "Unit": "Percent"},
+                {"MetricName": "AverageCostPerRun", "Value": avg_cost, "Unit": "None"},
+            ],
+        )
 
     threshold = float(os.environ.get("COST_ALERT_THRESHOLD_USD", "10.00"))
     alert_sent = False
