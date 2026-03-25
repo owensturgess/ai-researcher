@@ -72,6 +72,48 @@ logger = logging.getLogger(__name__)
 
 _INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
+_FAILURE_PREFIX = "source-failures/"
+
+
+def _failure_key(source_id):
+    return f"{_FAILURE_PREFIX}{source_id}.json"
+
+
+def track_source_failure(source_id, date, succeeded):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+    key = _failure_key(source_id)
+
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read())
+    except Exception:
+        data = {"consecutive_failures": 0}
+
+    if succeeded:
+        data["consecutive_failures"] = 0
+    else:
+        data["consecutive_failures"] = data.get("consecutive_failures", 0) + 1
+
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(data), ContentType="application/json")
+
+
+def get_failing_sources(threshold=3):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+
+    paginator = s3.get_paginator("list_objects_v2")
+    result = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=_FAILURE_PREFIX):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            source_id = key[len(_FAILURE_PREFIX):].removesuffix(".json")
+            data = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+            count = data.get("consecutive_failures", 0)
+            if count >= threshold:
+                result.append((source_id, count))
+    return result
+
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
@@ -662,7 +704,7 @@ def deduplicate_by_semantics(scored_items):
 import json
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
 
@@ -683,6 +725,19 @@ def _load_rolling_runs(s3, bucket, run_date_str, days=7):
     return runs
 
 
+def _delivery_latency_minutes(run):
+    started = run.get("started_at", "")
+    completed = run.get("completed_at", "")
+    if not started or not completed:
+        return 0.0
+    try:
+        t0 = datetime.fromisoformat(started)
+        t1 = datetime.fromisoformat(completed)
+        return (t1 - t0).total_seconds() / 60.0
+    except Exception:
+        return 0.0
+
+
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     run_date = os.environ.get("RUN_DATE", "")
@@ -692,10 +747,13 @@ def handler(event: dict, context: object) -> dict:
     run = json.loads(obj["Body"].read())
 
     sources_succeeded = run.get("sources_succeeded", 0)
+    sources_failed = run.get("sources_failed", 0)
     items_ingested = run.get("items_ingested", 0)
     items_above_threshold = run.get("items_above_threshold", 0)
+    items_in_briefing = run.get("items_in_briefing", 0)
     transcription_jobs = run.get("transcription_jobs", 0)
     estimated_cost_usd = run.get("estimated_cost_usd", 0.0)
+    delivery_latency = _delivery_latency_minutes(run)
 
     logger.info(
         "Pipeline run complete: sources_scanned=%s items_ingested=%s "
@@ -709,13 +767,16 @@ def handler(event: dict, context: object) -> dict:
 
     cloudwatch = boto3.client("cloudwatch")
     cloudwatch.put_metric_data(
-        Namespace="AiResearcher/Pipeline",
+        Namespace="AgenticSDLCIntel",
         MetricData=[
             {"MetricName": "SourcesScanned", "Value": sources_succeeded, "Unit": "Count"},
+            {"MetricName": "SourcesFailed", "Value": sources_failed, "Unit": "Count"},
             {"MetricName": "ItemsIngested", "Value": items_ingested, "Unit": "Count"},
             {"MetricName": "ItemsAboveThreshold", "Value": items_above_threshold, "Unit": "Count"},
             {"MetricName": "TranscriptionJobs", "Value": transcription_jobs, "Unit": "Count"},
             {"MetricName": "EstimatedCostUSD", "Value": estimated_cost_usd, "Unit": "None"},
+            {"MetricName": "DeliveryLatencyMinutes", "Value": delivery_latency, "Unit": "None"},
+            {"MetricName": "BriefingItemCount", "Value": items_in_briefing, "Unit": "Count"},
         ],
     )
 
@@ -1702,6 +1763,54 @@ def test_podcast_ingestion_returns_audio_content_items_for_recent_episodes():
     assert item.original_url == episode_enclosure_url
     assert item.published_date >= since
 
+--- tests/unit/test_s3_lifecycle_retention.py ---
+# tests/unit/test_s3_lifecycle_retention.py
+#
+# Behavior B036: Raw content, transcripts, scored items, and briefings older
+# than 30 days are automatically deleted.
+#
+# Tests the CDK Pipeline Stack (infra/stacks/pipeline_stack.py).
+# The S3 bucket must have an S3 lifecycle policy that expires objects after
+# 30 days across all data prefixes (raw/, transcripts/, scored/, briefings/)
+# so that storage costs remain bounded and data is purged automatically without
+# operator intervention.
+#
+# This test FAILS (RED) because infra/stacks/pipeline_stack.py does not exist yet.
+
+import aws_cdk as cdk
+from aws_cdk import assertions
+
+from infra.stacks.pipeline_stack import PipelineStack
+
+
+def test_pipeline_stack_s3_bucket_has_30_day_lifecycle_expiration_across_all_prefixes():
+    """
+    Given the CDK PipelineStack is synthesized, when the CloudFormation template
+    is inspected, the pipeline S3 bucket has at least one S3 lifecycle rule that
+    expires objects after 30 days — automatically deleting raw content, transcripts,
+    scored items, and briefings older than 30 days without manual operator action.
+    """
+    app = cdk.App()
+    stack = PipelineStack(app, "TestPipelineStack")
+    template = assertions.Template.from_stack(stack)
+
+    # The pipeline bucket must have a lifecycle configuration with a 30-day expiration rule.
+    # AWS CDK emits this as an AWS::S3::Bucket resource with LifecycleConfiguration.Rules
+    # containing at least one rule with ExpirationInDays=30 and Status=Enabled.
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {
+            "LifecycleConfiguration": {
+                "Rules": assertions.Match.array_with([
+                    assertions.Match.object_like({
+                        "ExpirationInDays": 30,
+                        "Status": "Enabled",
+                    })
+                ])
+            }
+        },
+    )
+
 --- tests/unit/test_x_api_ingestion.py ---
 # tests/unit/test_x_api_ingestion.py
 from datetime import datetime, timezone
@@ -2416,6 +2525,124 @@ def test_each_content_item_receives_relevance_score_between_0_and_100(
         assert 0 <= score <= 100, (
             f"relevance_score {score} out of [0,100] range for {item['id']}"
         )
+
+--- tests/unit/test_cloudwatch_metrics_namespace.py ---
+# tests/unit/test_cloudwatch_metrics_namespace.py
+#
+# Behavior B035: CloudWatch custom metrics are published to the
+# "AgenticSDLCIntel" namespace with dashboard and alarms.
+#
+# Tests the public interface handler(event, context) in src/monitoring/handler.py.
+# All per-run pipeline metrics must be published to "AgenticSDLCIntel" — not an
+# alternative namespace — so that the CDK-defined dashboard and alarms can
+# reference the same namespace and display / trigger without manual reconfiguration.
+#
+# This test FAILS (RED) because the handler currently publishes per-run metrics
+# to "AiResearcher/Pipeline" rather than "AgenticSDLCIntel", and is missing
+# required metric names: sources_failed, delivery_latency_minutes, briefing_item_count.
+import json
+from unittest.mock import MagicMock, patch
+
+import boto3
+from moto import mock_aws
+
+from src.monitoring.handler import handler
+
+REQUIRED_METRICS = {
+    "SourcesScanned",
+    "SourcesFailed",
+    "ItemsIngested",
+    "ItemsAboveThreshold",
+    "TranscriptionJobs",
+    "EstimatedCostUSD",
+    "DeliveryLatencyMinutes",
+    "BriefingItemCount",
+}
+
+
+@mock_aws
+def test_monitoring_handler_publishes_all_per_run_metrics_to_agentic_sdlc_intel_namespace(
+    monkeypatch,
+):
+    """
+    Given a completed PipelineRun record in S3 with all standard fields,
+    when the monitoring handler runs, it publishes all eight per-run metrics
+    (SourcesScanned, SourcesFailed, ItemsIngested, ItemsAboveThreshold,
+    TranscriptionJobs, EstimatedCostUSD, DeliveryLatencyMinutes,
+    BriefingItemCount) to the CloudWatch namespace "AgenticSDLCIntel" —
+    the same namespace referenced by the CDK dashboard and alarms — so that
+    operators can monitor pipeline health through the AWS Console without
+    namespace mismatch errors.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+    monkeypatch.setenv("COST_ALERT_THRESHOLD_USD", "100.00")
+    monkeypatch.setenv("SES_SENDER", "alerts@example.com")
+    monkeypatch.setenv("ALERT_RECIPIENT", "admin@example.com")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    pipeline_run = {
+        "run_date": "2026-03-24",
+        "started_at": "2026-03-24T06:00:00+00:00",
+        "completed_at": "2026-03-24T07:30:00+00:00",
+        "sources_attempted": 12,
+        "sources_succeeded": 11,
+        "sources_failed": 1,
+        "items_ingested": 47,
+        "items_scored": 47,
+        "items_above_threshold": 8,
+        "items_in_briefing": 8,
+        "transcription_jobs": 3,
+        "estimated_cost_usd": 2.47,
+        "delivery_status": "delivered",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key="pipeline-runs/2026-03-24/run.json",
+        Body=json.dumps(pipeline_run),
+    )
+
+    mock_cloudwatch = MagicMock()
+    mock_cloudwatch.put_metric_data.return_value = {}
+    mock_ses = MagicMock()
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service == "cloudwatch":
+            return mock_cloudwatch
+        if service == "ses":
+            return mock_ses
+        return moto_boto3_client(service, **kw)
+
+    with patch("src.monitoring.handler.boto3.client", side_effect=client_factory):
+        result = handler({}, None)
+
+    assert result["status"] == "ok"
+
+    # Collect all metrics published per namespace across all put_metric_data calls
+    metrics_by_namespace: dict[str, set] = {}
+    for call in mock_cloudwatch.put_metric_data.call_args_list:
+        kw = call.kwargs or {}
+        namespace = kw.get("Namespace", "")
+        metric_data = kw.get("MetricData", [])
+        names = {m.get("MetricName", "") for m in metric_data}
+        metrics_by_namespace.setdefault(namespace, set()).update(names)
+
+    # All required per-run metrics must be published to "AgenticSDLCIntel"
+    published_in_target = metrics_by_namespace.get("AgenticSDLCIntel", set())
+
+    missing = REQUIRED_METRICS - published_in_target
+    assert not missing, (
+        f"The following metrics were not published to 'AgenticSDLCIntel' namespace: "
+        f"{sorted(missing)}. "
+        f"Metrics found in 'AgenticSDLCIntel': {sorted(published_in_target)}. "
+        f"All namespaces published to: {list(metrics_by_namespace.keys())}. "
+        "All per-run metrics must use 'AgenticSDLCIntel' so the CDK-defined "
+        "dashboard and alarms can reference them without namespace mismatch."
+    )
 
 --- tests/unit/test_source_config_new_entry.py ---
 # tests/unit/test_source_config_new_entry.py
@@ -3250,6 +3477,71 @@ def test_podcast_episode_audio_transcribed_via_aws_transcribe_and_written_to_s3(
     assert transcript_text in stored_transcript
     assert result["transcript_status"] == "completed"
 
+--- tests/unit/test_consecutive_source_failure_tracking.py ---
+# tests/unit/test_consecutive_source_failure_tracking.py
+#
+# Behavior B034: A source that fails for 3 consecutive days triggers a warning
+# in operator metrics.
+#
+# Tests the public interfaces track_source_failure() and get_failing_sources()
+# in src/ingestion/handler.py. After recording 3 consecutive daily failures for
+# a source, get_failing_sources(threshold=3) must return that source so the
+# monitoring handler can surface it in operator metrics and CloudWatch alarms.
+import boto3
+from moto import mock_aws
+
+from src.ingestion.handler import get_failing_sources, track_source_failure
+
+
+@mock_aws
+def test_source_failing_three_consecutive_days_appears_in_get_failing_sources(
+    monkeypatch,
+):
+    """
+    Given a source whose ingestion has failed on 3 consecutive days (tracked
+    via track_source_failure()), when get_failing_sources(threshold=3) is
+    called, the source appears in the result with a consecutive failure count
+    of 3 — enabling the monitoring handler to surface a warning in operator
+    metrics and trigger CloudWatch alarms for persistently failing sources.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    source_id = "src-persistently-failing"
+
+    # Record 3 consecutive daily failures for the same source
+    track_source_failure(source_id, "2026-03-22", succeeded=False)
+    track_source_failure(source_id, "2026-03-23", succeeded=False)
+    track_source_failure(source_id, "2026-03-24", succeeded=False)
+
+    # A source with a different ID that succeeds on day 3 must NOT appear
+    other_id = "src-recovered"
+    track_source_failure(other_id, "2026-03-22", succeeded=False)
+    track_source_failure(other_id, "2026-03-23", succeeded=False)
+    track_source_failure(other_id, "2026-03-24", succeeded=True)  # reset on success
+
+    failing = get_failing_sources(threshold=3)
+
+    failing_ids = [src_id for src_id, _count in failing]
+    assert source_id in failing_ids, (
+        f"Source '{source_id}' with 3 consecutive failures must appear in "
+        f"get_failing_sources(threshold=3). Got: {failing}"
+    )
+
+    count_for_source = next(
+        count for src_id, count in failing if src_id == source_id
+    )
+    assert count_for_source == 3, (
+        f"Consecutive failure count must be 3, got {count_for_source}"
+    )
+
+    assert other_id not in failing_ids, (
+        f"Source '{other_id}' recovered on day 3 (succeeded=True resets count) "
+        f"and must not appear in get_failing_sources(threshold=3). Got: {failing}"
+    )
+
 ## Public Interfaces (DO NOT change signatures)
 
 # Public Interfaces
@@ -3534,6 +3826,12 @@ The constitution contains only template placeholders with no specific principles
 - **Category**: RED-FAILURE
 - **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
 - **Added after**: B029 at 2026-03-25T04:38:24Z
+
+
+### Sign: aws_cdk not installed — CDK infra tests fail at collection
+- **Category**: RED-FAILURE
+- **Detail**: `import aws_cdk` raises `ModuleNotFoundError` because `aws_cdk` is not in the test environment. The GREEN phase must install `aws_cdk` and `aws-cdk-lib` (e.g., `python3 -m pip install aws-cdk-lib constructs`) before the CDK assertions can run. The `infra/` package also needs `__init__.py` files at each level so Python treats it as a package.
+- **Added after**: B036 at 2026-03-25T04:59:18Z
 
 ## Output Format
 

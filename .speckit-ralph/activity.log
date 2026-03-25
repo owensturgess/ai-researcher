@@ -684,3 +684,12 @@
 [2026-03-24 22:01:16] VERIFY_GREEN START 
 [2026-03-24 22:01:30] VERIFY_GREEN PASS duration=14s B036
 [2026-03-24 22:01:30] PROGRESS START 
+[2026-03-24 22:01:31] PROGRESS PASS behavior=B036 description=Raw content, transcripts, scored items, and briefings older than 30 days are automatically deleted
+[2026-03-24 22:01:31] PROGRESS PASS duration=1s B036 complete
+[2026-03-24 22:01:31] REFACTOR START 
+[2026-03-24 22:03:07] REFACTOR PASS iteration=36
+[2026-03-24 22:03:07] REFACTOR PASS duration=96s Refactoring complete (iteration=36)
+[2026-03-24 22:03:07] VERIFY_REFACTOR START 
+[2026-03-24 22:03:19] VERIFY_REFACTOR PASS duration=12s refactor-36
+[2026-03-24 22:03:19] REPLAN SUGGESTED unchecked_tasks=15 completed=36
+[2026-03-24 22:03:19] COMPLETE PASS behaviors=36 iterations=36
