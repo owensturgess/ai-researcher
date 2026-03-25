@@ -7,6 +7,12 @@ from src.shared.models import Source
 def load_sources(config_path):
     with open(config_path) as f:
         config = yaml.safe_load(f)
+    raw = config.get("sources", [])
+    seen = set()
+    for s in raw:
+        if s["id"] in seen:
+            raise ValueError(f"duplicate source id: {s['id']}")
+        seen.add(s["id"])
     return [
         Source(
             id=s["id"],

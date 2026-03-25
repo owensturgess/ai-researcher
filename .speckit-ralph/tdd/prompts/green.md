@@ -40,13 +40,11 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-The test fails correctly at runtime (not import time). 
+Test fails as expected — `load_sources` silently accepts duplicate IDs today.
 
 ```
-FILE: tests/unit/test_context_prompt_hot_reload.py
+FILE: tests/unit/test_source_config_validation.py
 ```
-
-The test fails with `NotImplementedError` because `src/shared/config.py` has no implementation. It tests the public `load_context_prompt(config_dir)` interface: given a config directory containing `context-prompt.txt`, two consecutive calls must return the current file contents — proving the function reads from disk fresh each time (no caching), so an operator can update the file and the change takes effect on the next pipeline run without any code deployment.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -460,11 +458,13 @@ def handler(event: dict, context: object) -> dict:
 
 --- src/shared/config.py ---
 # src/shared/config.py
-# Stub — implementation pending (see B026, T039)
+import os
 
 
 def load_context_prompt(config_dir: str) -> str:
-    raise NotImplementedError("load_context_prompt not yet implemented")
+    path = os.path.join(config_dir, "context-prompt.txt")
+    with open(path) as f:
+        return f.read()
 
 
 def load_settings(config_dir: str):

@@ -41,52 +41,50 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_context_prompt_hot_reload.py
-# tests/unit/test_context_prompt_hot_reload.py
+# tests/unit/test_source_config_validation.py
+# tests/unit/test_source_config_validation.py
 #
-# Behavior B026: The relevance scoring context prompt can be updated without
-# code changes, taking effect on the next pipeline run.
+# Behavior B027: Source configuration is validated — duplicate IDs rejected.
 #
-# Tests the public interface load_context_prompt(config_dir) in
-# src/shared/config.py. Each call must read the file fresh from disk so that
-# an operator can edit context-prompt.txt and the change takes effect on the
-# next pipeline run without redeploying code.
-from src.shared.config import load_context_prompt
+# Tests the public interface load_sources(config_path) in src/ingestion/config.py.
+# When two source entries share the same ID, load_sources() must raise a
+# ValueError so that misconfigured configs are caught before ingestion runs.
+import textwrap
+
+import pytest
+
+from src.ingestion.config import load_sources
 
 
-def test_updated_context_prompt_file_is_returned_on_next_call_without_code_changes(
-    tmp_path,
-):
+def test_load_sources_raises_when_config_contains_duplicate_source_ids(tmp_path):
     """
-    Given config/context-prompt.txt is updated on disk between two calls to
-    load_context_prompt(), when the second call is made (no code changes), it
-    returns the new prompt text — confirming the function reads the file fresh
-    each time rather than caching the result.
+    Given a sources.yaml that contains two entries with the same id,
+    when load_sources() is called, it raises a ValueError — preventing
+    ambiguous pipeline runs where the same source ID would write to the
+    same S3 paths and produce non-deterministic results.
     """
-    config_dir = str(tmp_path)
-    prompt_file = tmp_path / "context-prompt.txt"
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-duplicate-id
+            name: First Source
+            type: rss
+            url: https://first.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-duplicate-id
+            name: Second Source With Same ID
+            type: web
+            url: https://second.example.com/articles
+            category: research
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
 
-    # Write initial prompt and read it
-    prompt_file.write_text("PROMPT_VERSION_ONE: Focus on agentic SDLC tooling.")
-    first_result = load_context_prompt(config_dir)
-
-    assert "PROMPT_VERSION_ONE" in first_result, (
-        f"load_context_prompt did not return the initial prompt text; got: {first_result!r}"
-    )
-
-    # Update the prompt on disk — no code changes, no restart
-    prompt_file.write_text("PROMPT_VERSION_TWO: Focus on autonomous agent orchestration.")
-    second_result = load_context_prompt(config_dir)
-
-    # The second call must reflect the updated file content
-    assert "PROMPT_VERSION_TWO" in second_result, (
-        "load_context_prompt returned stale content after the file was updated — "
-        "it appears to be caching the prompt rather than reading from disk each call. "
-        f"Got: {second_result!r}"
-    )
-    assert "PROMPT_VERSION_ONE" not in second_result, (
-        "load_context_prompt still returned old prompt text after the file was updated."
-    )
+    with pytest.raises(ValueError, match="duplicate"):
+        load_sources(str(config_file))
 
 ## Public Interfaces (from interfaces.md)
 
