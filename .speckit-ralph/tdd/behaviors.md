@@ -36,7 +36,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 |------|-------------|----------|-------|--------|
 | B019 | Given a batch of ingested content items, each item receives a relevance score (0-100) based on the configured company context | US3.S1 | T021, T034, T035 | complete |
 | B020 | Given the relevance threshold is set to 60 (default), only items scoring above 60 appear in the final briefing | US3.S2 | T037 | complete |
-| B021 | Given a scored item passes the relevance threshold, it is classified with an urgency level: Informational, Worth Discussing, or Action Needed | US3.S3 | T036 | queued |
+| B021 | Given a scored item passes the relevance threshold, it is classified with an urgency level: Informational, Worth Discussing, or Action Needed | US3.S3 | T036 | complete |
 | B022 | Given the same content item is processed on two consecutive days, the scores are consistent within ±10 points (scoring reliability) | US3.S4 | T035 | queued |
 
 ## User Story 4: Configurable Source Management

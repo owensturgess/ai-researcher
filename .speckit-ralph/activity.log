@@ -435,3 +435,18 @@
 [2026-03-24 20:51:46] VERIFY_GREEN START 
 [2026-03-24 20:51:48] VERIFY_GREEN PASS duration=2s B020
 [2026-03-24 20:51:49] PROGRESS START 
+[2026-03-24 20:51:49] PROGRESS PASS behavior=B020 description=Given the relevance threshold is set to 60 (default), only items scoring above 60 appear in the final briefing
+[2026-03-24 20:51:49] PROGRESS PASS duration=0s B020 complete
+[2026-03-24 21:05:36] RESUME READY last_complete=B020 next=B021 completed=20
+[2026-03-24 21:06:20] RESUME READY last_complete=B020 next=B021 completed=20
+[2026-03-24 21:06:20] RED START 
+[2026-03-24 21:07:05] RED PASS duration=45s Test written for B021
+[2026-03-24 21:07:05] VERIFY_RED START 
+[2026-03-24 21:07:13] VERIFY_RED PASS duration=8s B021
+[2026-03-24 21:07:13] VALIDATE START 
+[2026-03-24 21:07:51] VALIDATE PASS duration=38s Test approved for B021
+[2026-03-24 21:07:51] GREEN START 
+[2026-03-24 21:08:10] GREEN PASS duration=19s Implementation written for B021
+[2026-03-24 21:08:10] VERIFY_GREEN START 
+[2026-03-24 21:08:13] VERIFY_GREEN PASS duration=3s B021
+[2026-03-24 21:08:13] PROGRESS START 

@@ -29,11 +29,12 @@ def handler(event, context):
             body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
             item = json.loads(body)
 
-            score = _score_item(bedrock, context_prompt, item)
+            score, urgency = _score_item(bedrock, context_prompt, item)
 
             item_id = item["id"]
             scored = dict(item)
             scored["relevance_score"] = score
+            scored["urgency"] = urgency
             items_scored += 1
 
             s3.put_object(
@@ -72,4 +73,5 @@ def _score_item(bedrock, context_prompt, item):
     response_body = json.loads(response["body"].read())
     text = response_body["content"][0]["text"]
     parsed = json.loads(text)
-    return parsed["score"]
+    urgency = parsed.get("urgency", "informational")
+    return parsed["score"], urgency

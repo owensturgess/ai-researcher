@@ -100,7 +100,7 @@
 
 - [x] T034 [US3] Build structured scoring prompt in src/scoring/prompts/relevance.txt — chain-of-thought format requiring the LLM to (1) identify topic area, (2) assess relevance to transformation goals, (3) evaluate novelty/recency, (4) assign score 0-100, (5) classify urgency, (6) write relevance tag, (7) write 2-3 sentence summary; include 5-10 few-shot examples as score anchors; require JSON output format
 - [ ] T035 [US3] Implement scoring consistency measures in src/scoring/handler.py — use temperature=0 for Bedrock/Claude calls, include few-shot examples in every prompt, log chain-of-thought reasoning in ScoredItem.scoring_reasoning field for auditability
-- [ ] T036 [US3] Implement urgency classification logic in src/scoring/handler.py — map LLM output to enum (informational/worth_discussing/action_needed), validate classification is present and valid, default to informational if ambiguous
+- [x] T036 [US3] Implement urgency classification logic in src/scoring/handler.py — map LLM output to enum (informational/worth_discussing/action_needed), validate classification is present and valid, default to informational if ambiguous
 - [x] T037 [US3] Add configurable relevance threshold in src/scoring/handler.py — read threshold from settings.yaml (default: 60), filter ScoredItems, log count of items above/below threshold per run
 
 **Checkpoint**: Scoring pipeline produces consistent, well-calibrated results with chain-of-thought reasoning and configurable thresholds.
