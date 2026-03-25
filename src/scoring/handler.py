@@ -20,7 +20,9 @@ def handler(event, context):
     paginator = s3.get_paginator("list_objects_v2")
     pages = paginator.paginate(Bucket=bucket, Prefix=f"raw/{run_date}/")
 
+    threshold = int(os.environ.get("RELEVANCE_THRESHOLD", "60"))
     items_scored = 0
+    items_above_threshold = 0
     for page in pages:
         for obj in page.get("Contents", []):
             key = obj["Key"]
@@ -32,6 +34,7 @@ def handler(event, context):
             item_id = item["id"]
             scored = dict(item)
             scored["relevance_score"] = score
+            items_scored += 1
 
             s3.put_object(
                 Bucket=bucket,
@@ -39,14 +42,14 @@ def handler(event, context):
                 Body=json.dumps(scored),
                 ContentType="application/json",
             )
-            items_scored += 1
+            if score >= threshold:
+                items_above_threshold += 1
 
-    return {"items_scored": items_scored}
+    return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
 
 
 def _score_item(bedrock, context_prompt, item):
-    prompt_text = (
-        f"{context_prompt}\n\n"
+    user_text = (
         f"Title: {item.get('title', '')}\n"
         f"Content: {item.get('full_text', '')}\n\n"
         "Respond with JSON containing a 'score' field (integer 0-100)."
@@ -55,7 +58,8 @@ def _score_item(bedrock, context_prompt, item):
     request_body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 256,
-        "messages": [{"role": "user", "content": prompt_text}],
+        "system": context_prompt,
+        "messages": [{"role": "user", "content": user_text}],
     })
 
     response = bedrock.invoke_model(
