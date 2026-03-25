@@ -40,6 +40,8 @@ from src.ingestion.sources import rss, web, x_api
 
 logger = logging.getLogger(__name__)
 
+_INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
+
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
@@ -59,11 +61,9 @@ def handler(event, context):
     sources_succeeded = 0
     all_items = []
 
-    ingesters = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
-
     for source in sources:
         source_type = source.get("type")
-        ingest_fn = ingesters.get(source_type)
+        ingest_fn = _INGESTERS.get(source_type)
         if ingest_fn is None:
             continue
         try:
@@ -364,6 +364,19 @@ def _extract_youtube_transcript(original_url):
     return ""
 
 
+def _mark_transcript_failed(s3, bucket, run_date, source_id, item_id):
+    item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
+    obj = s3.get_object(Bucket=bucket, Key=item_key)
+    item_data = json.loads(obj["Body"].read())
+    item_data["transcript_status"] = "failed"
+    s3.put_object(
+        Bucket=bucket,
+        Key=item_key,
+        Body=json.dumps(item_data),
+        ContentType="application/json",
+    )
+
+
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     s3 = boto3.client("s3")
@@ -394,16 +407,7 @@ def handler(event: dict, context: object) -> dict:
             )
         except Exception:
             any_failed = True
-            item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
-            obj = s3.get_object(Bucket=bucket, Key=item_key)
-            item_data = json.loads(obj["Body"].read())
-            item_data["transcript_status"] = "failed"
-            s3.put_object(
-                Bucket=bucket,
-                Key=item_key,
-                Body=json.dumps(item_data),
-                ContentType="application/json",
-            )
+            _mark_transcript_failed(s3, bucket, run_date, source_id, item_id)
 
     if any_failed:
         return {"transcript_status": "failed"}
@@ -438,6 +442,113 @@ class ContentItem:
     original_url: str
     content_format: str = "text"  # text / audio / video
     transcript_status: str = "not_needed"  # pending / completed / failed / not_needed
+
+--- src/briefing/handler.py ---
+# src/briefing/handler.py
+import json
+import os
+
+import boto3
+
+
+def handler(event, context):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    run_date = os.environ.get("RUN_DATE", "")
+    threshold = int(os.environ.get("RELEVANCE_THRESHOLD", "60"))
+
+    s3 = boto3.client("s3")
+
+    paginator = s3.get_paginator("list_objects_v2")
+    pages = paginator.paginate(Bucket=bucket, Prefix=f"scored/{run_date}/")
+
+    included_items = []
+    for page in pages:
+        for obj in page.get("Contents", []):
+            body = s3.get_object(Bucket=bucket, Key=obj["Key"])["Body"].read()
+            item = json.loads(body)
+            if item.get("relevance_score", 0) >= threshold:
+                included_items.append(item)
+
+    return {"items_included": len(included_items)}
+
+--- src/scoring/handler.py ---
+# src/scoring/handler.py
+import json
+import os
+
+import boto3
+
+
+def handler(event, context):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    run_date = os.environ.get("RUN_DATE", "")
+    context_prompt_path = os.environ.get("CONTEXT_PROMPT_PATH", "config/context-prompt.txt")
+
+    with open(context_prompt_path) as f:
+        context_prompt = f.read().strip()
+
+    s3 = boto3.client("s3")
+    bedrock = boto3.client("bedrock-runtime")
+
+    # List all raw items for this run date
+    paginator = s3.get_paginator("list_objects_v2")
+    pages = paginator.paginate(Bucket=bucket, Prefix=f"raw/{run_date}/")
+
+    threshold = int(os.environ.get("RELEVANCE_THRESHOLD", "60"))
+    items_scored = 0
+    items_above_threshold = 0
+    for page in pages:
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            item = json.loads(body)
+
+            score, urgency = _score_item(bedrock, context_prompt, item)
+
+            item_id = item["id"]
+            scored = dict(item)
+            scored["relevance_score"] = score
+            scored["urgency"] = urgency
+            items_scored += 1
+
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"scored/{run_date}/{item_id}.json",
+                Body=json.dumps(scored),
+                ContentType="application/json",
+            )
+            if score >= threshold:
+                items_above_threshold += 1
+
+    return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
+
+
+def _score_item(bedrock, context_prompt, item):
+    user_text = (
+        f"Title: {item.get('title', '')}\n"
+        f"Content: {item.get('full_text', '')}\n\n"
+        "Respond with JSON containing a 'score' field (integer 0-100)."
+    )
+
+    request_body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 256,
+        "system": context_prompt,
+        "messages": [{"role": "user", "content": user_text}],
+    })
+
+    response = bedrock.invoke_model(
+        modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        body=request_body,
+        contentType="application/json",
+        accept="application/json",
+    )
+
+    response_body = json.loads(response["body"].read())
+    text = response_body["content"][0]["text"]
+    parsed = json.loads(text)
+    urgency = parsed.get("urgency", "informational")
+    return parsed["score"], urgency
 
 ## Current Tests
 
@@ -813,6 +924,100 @@ def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_count
     assert "items_ingested" in run_data
     assert "transcription_jobs" in run_data
     assert "delivery_status" in run_data
+
+--- tests/unit/test_briefing_threshold_filtering.py ---
+# tests/unit/test_briefing_threshold_filtering.py
+import json
+from unittest.mock import MagicMock, patch
+
+import boto3
+from moto import mock_aws
+
+from src.briefing.handler import handler
+
+
+@mock_aws
+def test_only_items_above_relevance_threshold_appear_in_final_briefing(
+    monkeypatch, tmp_path
+):
+    """
+    Given the relevance threshold is set to 60 (default) and scored items in S3
+    where one item has score 75 (above threshold) and one has score 40 (below
+    threshold), when the briefing handler runs, only the item scoring above 60
+    appears in the briefing — items_included == 1.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+    monkeypatch.setenv("RELEVANCE_THRESHOLD", "60")
+    monkeypatch.setenv("SES_SENDER", "briefing@example.com")
+    monkeypatch.setenv("RECIPIENTS", "user@example.com")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    # Item above threshold (score 75) — should appear in briefing
+    item_above = {
+        "id": "item-above",
+        "title": "Claude 4 Released with Agentic Capabilities",
+        "source_id": "src-rss-1",
+        "source_name": "AI News",
+        "published_date": "2026-03-24T08:00:00+00:00",
+        "full_text": "Anthropic released Claude 4.",
+        "original_url": "https://example.com/claude-4",
+        "content_format": "text",
+        "transcript_status": "not_needed",
+        "relevance_score": 75,
+        "urgency": "worth_discussing",
+        "relevance_tag": "AI Tools",
+        "executive_summary": "Major agentic AI release.",
+        "scoring_reasoning": "Highly relevant to agentic SDLC goals.",
+        "is_duplicate": False,
+        "duplicate_of": None,
+    }
+
+    # Item below threshold (score 40) — must NOT appear in briefing
+    item_below = {
+        "id": "item-below",
+        "title": "Local Weather Forecast for March",
+        "source_id": "src-rss-2",
+        "source_name": "Weather Feed",
+        "published_date": "2026-03-24T07:00:00+00:00",
+        "full_text": "Expect sunny skies.",
+        "original_url": "https://example.com/weather",
+        "content_format": "text",
+        "transcript_status": "not_needed",
+        "relevance_score": 40,
+        "urgency": "informational",
+        "relevance_tag": "Other",
+        "executive_summary": "Local weather update.",
+        "scoring_reasoning": "Not relevant to agentic SDLC goals.",
+        "is_duplicate": False,
+        "duplicate_of": None,
+    }
+
+    for item in [item_above, item_below]:
+        s3.put_object(
+            Bucket="test-pipeline-bucket",
+            Key=f"scored/2026-03-24/{item['id']}.json",
+            Body=json.dumps(item),
+        )
+
+    # Mock SES at the AWS service boundary — we only care about item filtering
+    mock_ses = MagicMock()
+    mock_ses.send_email.return_value = {"MessageId": "msg-001"}
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service == "ses":
+            return mock_ses
+        return moto_boto3_client(service, **kw)
+
+    with patch("src.briefing.handler.boto3.client", side_effect=client_factory):
+        result = handler({}, None)
+
+    # Only the item above the 60-point threshold must appear in the briefing
+    assert result["items_included"] == 1
 
 --- tests/unit/test_podcast_budget_cap.py ---
 # tests/unit/test_podcast_budget_cap.py
@@ -1294,6 +1499,128 @@ def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(c
     rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
     assert len(rate_limit_logs) >= 1
 
+--- tests/unit/test_scoring_relevance.py ---
+# tests/unit/test_scoring_relevance.py
+import json
+from unittest.mock import MagicMock, patch
+
+import boto3
+from moto import mock_aws
+
+from src.scoring.handler import handler
+
+
+@mock_aws
+def test_each_content_item_receives_relevance_score_between_0_and_100(
+    monkeypatch, tmp_path
+):
+    """
+    Given a batch of ingested ContentItems in S3 and a configured company context
+    prompt, when the scoring handler runs, each item is scored by the LLM and a
+    ScoredItem is written to S3 at scored/{date}/{item_id}.json with a
+    relevance_score between 0 and 100 inclusive.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Write context-prompt.txt at the filesystem boundary
+    context_prompt = (
+        "Score content for relevance to agentic SDLC transformation goals."
+    )
+    context_file = tmp_path / "context-prompt.txt"
+    context_file.write_text(context_prompt)
+    monkeypatch.setenv("CONTEXT_PROMPT_PATH", str(context_file))
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    # Write two ContentItems to S3 at the raw path
+    items = [
+        {
+            "id": "item-001",
+            "title": "Claude 4 Released with Agentic Capabilities",
+            "source_id": "src-rss-1",
+            "source_name": "AI News",
+            "published_date": "2026-03-24T08:00:00+00:00",
+            "full_text": "Anthropic released Claude 4 with major agentic improvements.",
+            "original_url": "https://example.com/claude-4",
+            "content_format": "text",
+            "transcript_status": "not_needed",
+        },
+        {
+            "id": "item-002",
+            "title": "Local Weather Forecast for March",
+            "source_id": "src-rss-2",
+            "source_name": "Weather Feed",
+            "published_date": "2026-03-24T07:00:00+00:00",
+            "full_text": "Expect sunny skies with a high of 72 degrees.",
+            "original_url": "https://example.com/weather",
+            "content_format": "text",
+            "transcript_status": "not_needed",
+        },
+    ]
+    for item in items:
+        s3.put_object(
+            Bucket="test-pipeline-bucket",
+            Key=f"raw/2026-03-24/{item['source_id']}/{item['id']}.json",
+            Body=json.dumps(item),
+        )
+
+    # Mock Bedrock at the AWS service boundary — returns structured JSON scores
+    def bedrock_invoke_side_effect(modelId, body, **kwargs):
+        request = json.loads(body)
+        # Return a different score per item based on content to simulate LLM scoring
+        title = ""
+        for msg in request.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                title = content
+                break
+        score = 85 if "Claude" in title or "claude" in title.lower() else 12
+        response_body = json.dumps({
+            "score": score,
+            "urgency": "worth_discussing",
+            "relevance_tag": "AI Tools",
+            "summary": "Summary of the item.",
+            "reasoning": "Scored based on relevance to agentic SDLC.",
+        })
+        mock_stream = MagicMock()
+        mock_stream.read.return_value = json.dumps({
+            "content": [{"text": response_body}]
+        }).encode("utf-8")
+        return {"body": mock_stream}
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.side_effect = bedrock_invoke_side_effect
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service in ("bedrock-runtime", "bedrock"):
+            return mock_bedrock
+        return moto_boto3_client(service, **kw)
+
+    with patch("src.scoring.handler.boto3.client", side_effect=client_factory):
+        result = handler({}, None)
+
+    # Handler must report all items scored
+    assert result["items_scored"] == 2
+
+    # Each item must have a ScoredItem written to S3 with relevance_score in [0, 100]
+    for item in items:
+        key = f"scored/2026-03-24/{item['id']}.json"
+        response = s3.get_object(Bucket="test-pipeline-bucket", Key=key)
+        scored = json.loads(response["Body"].read())
+
+        assert "relevance_score" in scored, f"relevance_score missing for {item['id']}"
+        score = scored["relevance_score"]
+        assert isinstance(score, (int, float)), (
+            f"relevance_score must be numeric, got {type(score)} for {item['id']}"
+        )
+        assert 0 <= score <= 100, (
+            f"relevance_score {score} out of [0,100] range for {item['id']}"
+        )
+
 --- tests/unit/test_youtube_transcription_failure.py ---
 # tests/unit/test_youtube_transcription_failure.py
 import json
@@ -1388,6 +1715,98 @@ def test_youtube_no_transcript_and_transcription_failure_item_preserved_with_una
     assert updated_item["original_url"] == video_url
     # transcript_status must be 'failed' (the "transcript unavailable" flag)
     assert updated_item["transcript_status"] == "failed"
+
+--- tests/unit/test_scoring_urgency_classification.py ---
+# tests/unit/test_scoring_urgency_classification.py
+import json
+from unittest.mock import MagicMock, patch
+
+import boto3
+from moto import mock_aws
+
+from src.scoring.handler import handler
+
+VALID_URGENCY_LEVELS = {"informational", "worth_discussing", "action_needed"}
+
+
+@mock_aws
+def test_scored_item_above_threshold_is_classified_with_valid_urgency_level(
+    monkeypatch, tmp_path
+):
+    """
+    Given a ContentItem that scores above the relevance threshold, when the
+    scoring handler runs and the LLM returns urgency='action_needed', the
+    ScoredItem written to S3 has urgency set to one of the three valid levels:
+    informational, worth_discussing, or action_needed.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+    monkeypatch.setenv("RELEVANCE_THRESHOLD", "60")
+
+    context_file = tmp_path / "context-prompt.txt"
+    context_file.write_text(
+        "Score content for relevance to agentic SDLC transformation goals."
+    )
+    monkeypatch.setenv("CONTEXT_PROMPT_PATH", str(context_file))
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item = {
+        "id": "item-urgency-001",
+        "title": "Critical: GPT-5 Threatens Competitive Position",
+        "source_id": "src-rss-1",
+        "source_name": "AI News",
+        "published_date": "2026-03-24T08:00:00+00:00",
+        "full_text": "OpenAI released GPT-5 with capabilities far exceeding current models.",
+        "original_url": "https://example.com/gpt5-release",
+        "content_format": "text",
+        "transcript_status": "not_needed",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{item['source_id']}/{item['id']}.json",
+        Body=json.dumps(item),
+    )
+
+    # Bedrock returns score=90 (above threshold=60) with urgency='action_needed'
+    llm_response_body = json.dumps({
+        "score": 90,
+        "urgency": "action_needed",
+        "relevance_tag": "Competitive Intelligence",
+        "summary": "GPT-5 release poses direct competitive threat to agentic SDLC goals.",
+        "reasoning": "High-relevance competitive development requiring immediate attention.",
+    })
+    mock_stream = MagicMock()
+    mock_stream.read.return_value = json.dumps({
+        "content": [{"text": llm_response_body}]
+    }).encode("utf-8")
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.return_value = {"body": mock_stream}
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service in ("bedrock-runtime", "bedrock"):
+            return mock_bedrock
+        return moto_boto3_client(service, **kw)
+
+    with patch("src.scoring.handler.boto3.client", side_effect=client_factory):
+        handler({}, None)
+
+    # ScoredItem must be written with a valid urgency classification
+    key = f"scored/2026-03-24/{item['id']}.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=key)
+    scored = json.loads(response["Body"].read())
+
+    assert "urgency" in scored, "ScoredItem missing urgency field"
+    assert scored["urgency"] in VALID_URGENCY_LEVELS, (
+        f"urgency '{scored['urgency']}' is not one of {VALID_URGENCY_LEVELS}"
+    )
+    assert scored["urgency"] == "action_needed", (
+        f"Expected 'action_needed' from LLM response, got '{scored['urgency']}'"
+    )
 
 --- tests/unit/test_podcast_transcription.py ---
 # tests/unit/test_podcast_transcription.py

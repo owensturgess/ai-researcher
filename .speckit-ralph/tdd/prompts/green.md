@@ -40,17 +40,13 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
+Test fails correctly. The assertion shows scores differ by 45 points (30 vs 75) because the handler doesn't pass `temperature=0` to Bedrock.
+
 ```
-FILE: tests/unit/test_scoring_urgency_classification.py
+FILE: tests/unit/test_scoring_reliability.py
 ```
 
-The test puts a single `ContentItem` in S3, mocks Bedrock to return `score=90` with `urgency="action_needed"` (well above the threshold of 60), calls the scoring handler, then asserts:
-
-1. The `urgency` field is present in the written `ScoredItem`
-2. It is one of the three valid classifications (`informational`, `worth_discussing`, `action_needed`)
-3. It matches the LLM's returned value (`action_needed`)
-
-This will fail RED because the scoring handler does not yet validate and persist the urgency classification field.
+The test fails with `AssertionError: Scores differ by 45 points (day1=30, day2=75)`. The mock simulates LLM non-determinism — returning alternating scores (30, 75) when `temperature` is absent, but a stable 75 on both calls when `temperature=0` is set. The current handler (`src/scoring/handler.py:15`) builds the Bedrock request body without a `temperature` field, so the mock's non-deterministic path triggers and the ±10 reliability assertion fails.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -507,49 +503,6 @@ import os
 import boto3
 
 
-def handler(event, context):
-    bucket = os.environ["PIPELINE_BUCKET"]
-    run_date = os.environ.get("RUN_DATE", "")
-    context_prompt_path = os.environ.get("CONTEXT_PROMPT_PATH", "config/context-prompt.txt")
-
-    with open(context_prompt_path) as f:
-        context_prompt = f.read().strip()
-
-    s3 = boto3.client("s3")
-    bedrock = boto3.client("bedrock-runtime")
-
-    # List all raw items for this run date
-    paginator = s3.get_paginator("list_objects_v2")
-    pages = paginator.paginate(Bucket=bucket, Prefix=f"raw/{run_date}/")
-
-    threshold = int(os.environ.get("RELEVANCE_THRESHOLD", "60"))
-    items_scored = 0
-    items_above_threshold = 0
-    for page in pages:
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-            item = json.loads(body)
-
-            score = _score_item(bedrock, context_prompt, item)
-
-            item_id = item["id"]
-            scored = dict(item)
-            scored["relevance_score"] = score
-            items_scored += 1
-
-            s3.put_object(
-                Bucket=bucket,
-                Key=f"scored/{run_date}/{item_id}.json",
-                Body=json.dumps(scored),
-                ContentType="application/json",
-            )
-            if score >= threshold:
-                items_above_threshold += 1
-
-    return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
-
-
 def _score_item(bedrock, context_prompt, item):
     user_text = (
         f"Title: {item.get('title', '')}\n"
@@ -574,7 +527,51 @@ def _score_item(bedrock, context_prompt, item):
     response_body = json.loads(response["body"].read())
     text = response_body["content"][0]["text"]
     parsed = json.loads(text)
-    return parsed["score"]
+    urgency = parsed.get("urgency", "informational")
+    return parsed["score"], urgency
+
+
+def handler(event, context):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    run_date = os.environ.get("RUN_DATE", "")
+    context_prompt_path = os.environ.get("CONTEXT_PROMPT_PATH", "config/context-prompt.txt")
+
+    with open(context_prompt_path) as f:
+        context_prompt = f.read().strip()
+
+    s3 = boto3.client("s3")
+    bedrock = boto3.client("bedrock-runtime")
+
+    paginator = s3.get_paginator("list_objects_v2")
+    pages = paginator.paginate(Bucket=bucket, Prefix=f"raw/{run_date}/")
+
+    threshold = int(os.environ.get("RELEVANCE_THRESHOLD", "60"))
+    items_scored = 0
+    items_above_threshold = 0
+    for page in pages:
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            item = json.loads(body)
+
+            score, urgency = _score_item(bedrock, context_prompt, item)
+
+            item_id = item["id"]
+            scored = dict(item)
+            scored["relevance_score"] = score
+            scored["urgency"] = urgency
+            items_scored += 1
+
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"scored/{run_date}/{item_id}.json",
+                Body=json.dumps(scored),
+                ContentType="application/json",
+            )
+            if score >= threshold:
+                items_above_threshold += 1
+
+    return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
 
 ## Plan Context (language, framework, project structure)
 
