@@ -2,7 +2,7 @@
 import json
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
 
@@ -23,6 +23,19 @@ def _load_rolling_runs(s3, bucket, run_date_str, days=7):
     return runs
 
 
+def _delivery_latency_minutes(run):
+    started = run.get("started_at", "")
+    completed = run.get("completed_at", "")
+    if not started or not completed:
+        return 0.0
+    try:
+        t0 = datetime.fromisoformat(started)
+        t1 = datetime.fromisoformat(completed)
+        return (t1 - t0).total_seconds() / 60.0
+    except Exception:
+        return 0.0
+
+
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     run_date = os.environ.get("RUN_DATE", "")
@@ -32,10 +45,13 @@ def handler(event: dict, context: object) -> dict:
     run = json.loads(obj["Body"].read())
 
     sources_succeeded = run.get("sources_succeeded", 0)
+    sources_failed = run.get("sources_failed", 0)
     items_ingested = run.get("items_ingested", 0)
     items_above_threshold = run.get("items_above_threshold", 0)
+    items_in_briefing = run.get("items_in_briefing", 0)
     transcription_jobs = run.get("transcription_jobs", 0)
     estimated_cost_usd = run.get("estimated_cost_usd", 0.0)
+    delivery_latency = _delivery_latency_minutes(run)
 
     logger.info(
         "Pipeline run complete: sources_scanned=%s items_ingested=%s "
@@ -49,13 +65,16 @@ def handler(event: dict, context: object) -> dict:
 
     cloudwatch = boto3.client("cloudwatch")
     cloudwatch.put_metric_data(
-        Namespace="AiResearcher/Pipeline",
+        Namespace="AgenticSDLCIntel",
         MetricData=[
             {"MetricName": "SourcesScanned", "Value": sources_succeeded, "Unit": "Count"},
+            {"MetricName": "SourcesFailed", "Value": sources_failed, "Unit": "Count"},
             {"MetricName": "ItemsIngested", "Value": items_ingested, "Unit": "Count"},
             {"MetricName": "ItemsAboveThreshold", "Value": items_above_threshold, "Unit": "Count"},
             {"MetricName": "TranscriptionJobs", "Value": transcription_jobs, "Unit": "Count"},
             {"MetricName": "EstimatedCostUSD", "Value": estimated_cost_usd, "Unit": "None"},
+            {"MetricName": "DeliveryLatencyMinutes", "Value": delivery_latency, "Unit": "None"},
+            {"MetricName": "BriefingItemCount", "Value": items_in_briefing, "Unit": "Count"},
         ],
     )
 

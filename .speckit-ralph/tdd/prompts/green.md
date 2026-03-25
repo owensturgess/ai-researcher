@@ -40,17 +40,17 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails at import — correct RED state.
+Test fails as expected with a clear error message.
 
 ```
-FILE: tests/unit/test_consecutive_source_failure_tracking.py
+FILE: tests/unit/test_cloudwatch_metrics_namespace.py
 ```
 
-The test imports `get_failing_sources` and `track_source_failure` from `src.ingestion.handler`, which don't exist yet. The `ImportError` confirms a valid RED state. The test exercises the full observable contract for B034:
+The test fails because the handler currently:
+1. Publishes per-run metrics to `"AiResearcher/Pipeline"` instead of `"AgenticSDLCIntel"`
+2. Is missing 3 required metrics: `SourcesFailed`, `DeliveryLatencyMinutes`, `BriefingItemCount`
 
-1. `track_source_failure(source_id, date, succeeded=False)` increments consecutive failure count for a source
-2. `track_source_failure(source_id, date, succeeded=True)` resets the count on recovery
-3. `get_failing_sources(threshold=3)` returns `(source_id, count)` tuples where count ≥ threshold — and excludes sources that have recovered
+The GREEN phase will need to move all per-run `put_metric_data` calls to the `"AgenticSDLCIntel"` namespace and add the three missing metrics.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -99,6 +99,48 @@ from src.ingestion.sources import rss, web, x_api
 logger = logging.getLogger(__name__)
 
 _INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
+
+_FAILURE_PREFIX = "source-failures/"
+
+
+def _failure_key(source_id):
+    return f"{_FAILURE_PREFIX}{source_id}.json"
+
+
+def track_source_failure(source_id, date, succeeded):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+    key = _failure_key(source_id)
+
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read())
+    except Exception:
+        data = {"consecutive_failures": 0}
+
+    if succeeded:
+        data["consecutive_failures"] = 0
+    else:
+        data["consecutive_failures"] = data.get("consecutive_failures", 0) + 1
+
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(data), ContentType="application/json")
+
+
+def get_failing_sources(threshold=3):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+
+    paginator = s3.get_paginator("list_objects_v2")
+    result = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=_FAILURE_PREFIX):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            source_id = key[len(_FAILURE_PREFIX):].removesuffix(".json")
+            data = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
+            count = data.get("consecutive_failures", 0)
+            if count >= threshold:
+                result.append((source_id, count))
+    return result
 
 
 def load_sources():
