@@ -40,47 +40,18 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Both files already exist on disk from a previous session — the RED test and GREEN implementation for B009 are complete. The test at `tests/unit/test_youtube_ingestion.py` is already written and matches the behavior under test exactly.
+Test fails as expected (RED).
 
 ```
-FILE: tests/unit/test_youtube_ingestion.py
+FILE: tests/unit/test_podcast_ingestion.py
 ```
 
-The test was already written in a prior session (visible as untracked in git status). It:
-- Mocks `googleapiclient.discovery.build` at the external API boundary
-- Calls `ingest(source, since)` through the public interface
-- Asserts `content_format == "video"`, correct `source_id`, `title`, `published_date`, and `original_url` containing the video ID
+The test:
+- Mocks `feedparser.parse` at the network boundary with a feed entry that has an enclosure URL
+- Calls `ingest(source, since)` on a podcast-type Source
+- Asserts the result contains one ContentItem with `content_format=audio`, correct `source_id`, `title`, `original_url` (the enclosure URL), and `published_date >= since`
 
-The B009-red.md, B009-green.md, and B009-validate.md iteration files also already exist, indicating this behavior has progressed through all TDD phases. No action needed — the RED step for B009 is complete.
-
-## Previous GREEN Gate Failure (MUST fix these issues)
-GATE: VERIFY_GREEN for B009
-CHECK FAIL: Test suite FAILED after implementation.
-Test output:
-============================= test session starts ==============================
-platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
-rootdir: /Users/ocs/Documents/GitHub/ai-researcher
-plugins: cov-7.0.0
-collected 2 items / 1 error
-
-==================================== ERRORS ====================================
-____________ ERROR collecting tests/unit/test_youtube_ingestion.py _____________
-ImportError while importing test module '/Users/ocs/Documents/GitHub/ai-researcher/tests/unit/test_youtube_ingestion.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py:88: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests/unit/test_youtube_ingestion.py:5: in <module>
-    from src.ingestion.sources.youtube import ingest
-src/ingestion/sources/youtube.py:4: in <module>
-    from googleapiclient.discovery import build
-E   ModuleNotFoundError: No module named 'googleapiclient'
-=========================== short test summary info ============================
-ERROR tests/unit/test_youtube_ingestion.py
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-=============================== 1 error in 0.62s ===============================
-RESULT: FAIL
+Fails with `NotImplementedError` from the stub — ready for GREEN.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -153,15 +124,15 @@ def ingest(source, since):
     feed = feedparser.parse(source["url"])
     if feed.bozo:
         return []
-    items = []
-    for entry in feed.entries:
-        items.append({
+    return [
+        {
             "title": getattr(entry, "title", ""),
             "url": getattr(entry, "link", ""),
             "summary": getattr(entry, "summary", ""),
             "source_id": source["id"],
-        })
-    return items
+        }
+        for entry in feed.entries
+    ]
 
 --- src/ingestion/sources/web.py ---
 # src/ingestion/sources/web.py
@@ -255,6 +226,13 @@ def ingest(source, since):
             content_format="video",
         ))
     return items
+
+--- src/ingestion/sources/podcast.py ---
+# src/ingestion/sources/podcast.py
+
+
+def ingest(source, since):
+    raise NotImplementedError
 
 --- src/shared/models.py ---
 # src/shared/models.py
@@ -430,3 +408,9 @@ tests/
 - **Category**: RED-FAILURE
 - **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
 - **Added after**: B006 at 2026-03-25T02:04:10Z
+
+
+### Sign: pip shim broken for older Python, use python3 -m pip
+- **Category**: GREEN-FAILURE
+- **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
+- **Added after**: B009 at 2026-03-25T02:58:00Z

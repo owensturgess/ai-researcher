@@ -41,72 +41,57 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_youtube_ingestion.py
-# tests/unit/test_youtube_ingestion.py
+# tests/unit/test_podcast_ingestion.py
+# tests/unit/test_podcast_ingestion.py
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from src.ingestion.sources.youtube import ingest
+from src.ingestion.sources.podcast import ingest
 from src.shared.models import Source
 
 
-def test_youtube_ingestion_returns_video_content_items_for_recent_videos():
+def test_podcast_ingestion_returns_audio_content_items_for_recent_episodes():
     """
-    Given a YouTube source and a since datetime, when ingest() is called,
-    it returns ContentItem objects with content_format=video for videos
+    Given a podcast source and a since datetime, when ingest() is called,
+    it returns ContentItem objects with content_format=audio for episodes
     published after `since`, each with source_id, title, published_date,
-    and original_url populated from the YouTube API response.
+    and original_url set to the enclosure (audio file) URL.
     """
     source = Source(
-        id="yt-source-1",
-        name="AI Channel",
-        type="youtube",
-        url="https://www.youtube.com/channel/UC_test_channel_id",
+        id="podcast-source-1",
+        name="AI Podcast",
+        type="podcast",
+        url="https://example.com/podcast/feed.xml",
         category="ai",
         active=True,
         priority=1,
     )
     since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
 
-    video_id = "dQw4w9WgXcQ"
-    video_title = "Latest AI Developments Explained"
-    published_at = "2026-03-24T10:00:00Z"
+    episode_title = "Episode 42: The Future of Agentic AI"
+    episode_enclosure_url = "https://example.com/podcast/ep42.mp3"
 
-    mock_search_response = {
-        "items": [
-            {
-                "id": {"videoId": video_id},
-                "snippet": {
-                    "title": video_title,
-                    "publishedAt": published_at,
-                    "channelTitle": "AI Channel",
-                },
-            }
-        ]
-    }
+    mock_entry = MagicMock()
+    mock_entry.title = episode_title
+    mock_entry.published_parsed = (2026, 3, 24, 9, 0, 0, 0, 0, 0)
+    mock_entry.enclosures = [
+        MagicMock(href=episode_enclosure_url, type="audio/mpeg")
+    ]
 
-    mock_list_request = MagicMock()
-    mock_list_request.execute.return_value = mock_search_response
+    mock_feed = MagicMock()
+    mock_feed.bozo = False
+    mock_feed.entries = [mock_entry]
 
-    mock_search = MagicMock()
-    mock_search.list.return_value = mock_list_request
-
-    mock_youtube_client = MagicMock()
-    mock_youtube_client.search.return_value = mock_search
-
-    with patch(
-        "src.ingestion.sources.youtube.build",
-        return_value=mock_youtube_client,
-    ):
+    with patch("feedparser.parse", return_value=mock_feed):
         results = ingest(source, since)
 
     assert len(results) == 1
     item = results[0]
-    assert item.source_id == "yt-source-1"
-    assert item.title == video_title
-    assert item.content_format == "video"
-    assert video_id in item.original_url
-    assert item.published_date == datetime(2026, 3, 24, 10, 0, 0, tzinfo=timezone.utc)
+    assert item.source_id == "podcast-source-1"
+    assert item.title == episode_title
+    assert item.content_format == "audio"
+    assert item.original_url == episode_enclosure_url
+    assert item.published_date >= since
 
 ## Public Interfaces (from interfaces.md)
 
@@ -374,3 +359,9 @@ The constitution contains only template placeholders with no specific principles
 - **Category**: RED-FAILURE
 - **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
 - **Added after**: B006 at 2026-03-25T02:04:10Z
+
+
+### Sign: pip shim broken for older Python, use python3 -m pip
+- **Category**: GREEN-FAILURE
+- **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
+- **Added after**: B009 at 2026-03-25T02:58:00Z

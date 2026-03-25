@@ -2,6 +2,10 @@
 
 You are a refactoring agent for a TDD-driven project. Your job is to improve code quality without changing behavior.
 
+## CRITICAL: You MUST modify files on disk
+
+You MUST use your file-writing tools to edit implementation files directly on disk. Do NOT just output or describe changes — actually apply them. The refactored files must be updated on the filesystem when you are done.
+
 ## Rules
 
 1. **All tests must still pass** after your changes. Do not break any existing tests.
@@ -22,11 +26,437 @@ You are a refactoring agent for a TDD-driven project. Your job is to improve cod
 
 ## Current Implementation
 
-(No implementation source code found)
+
+--- src/ingestion/handler.py ---
+# src/ingestion/handler.py
+import json
+import os
+
+import boto3
+import yaml
+
+from src.ingestion.sources import rss, web
+
+
+def load_sources():
+    config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return [s for s in config.get("sources", []) if s.get("active", True)]
+
+
+def handler(event, context):
+    bucket = os.environ["PIPELINE_BUCKET"]
+    run_date = os.environ.get("RUN_DATE", "")
+    s3 = boto3.client("s3")
+
+    sources = load_sources()
+    sources_attempted = len(sources)
+    sources_succeeded = 0
+    all_items = []
+
+    ingesters = {"rss": rss.ingest, "web": web.ingest}
+
+    for source in sources:
+        source_type = source.get("type")
+        ingest_fn = ingesters.get(source_type)
+        if ingest_fn is None:
+            continue
+        try:
+            items = ingest_fn(source, since=None)
+            all_items.extend(items)
+            sources_succeeded += 1
+        except Exception:
+            pass
+
+    run_record = {
+        "sources_attempted": sources_attempted,
+        "sources_succeeded": sources_succeeded,
+        "items_ingested": len(all_items),
+        "transcription_jobs": 0,
+        "delivery_status": "pending",
+    }
+
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"pipeline-runs/{run_date}/run.json",
+        Body=json.dumps(run_record),
+        ContentType="application/json",
+    )
+
+    return run_record
+
+--- src/ingestion/sources/rss.py ---
+# src/ingestion/sources/rss.py
+import feedparser
+
+
+def ingest(source, since):
+    feed = feedparser.parse(source["url"])
+    if feed.bozo:
+        return []
+    items = []
+    for entry in feed.entries:
+        items.append({
+            "title": getattr(entry, "title", ""),
+            "url": getattr(entry, "link", ""),
+            "summary": getattr(entry, "summary", ""),
+            "source_id": source["id"],
+        })
+    return items
+
+--- src/ingestion/sources/web.py ---
+# src/ingestion/sources/web.py
+import urllib.request
+from bs4 import BeautifulSoup
+
+
+def ingest(source, since):
+    with urllib.request.urlopen(source["url"]) as response:
+        html = response.read()
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+    for article in soup.find_all("article"):
+        title_tag = article.find(["h1", "h2", "h3"])
+        title = title_tag.get_text(strip=True) if title_tag else ""
+        p_tag = article.find("p")
+        summary = p_tag.get_text(strip=True) if p_tag else ""
+        items.append({
+            "title": title,
+            "url": source["url"],
+            "summary": summary,
+            "source_id": source["id"],
+        })
+    return items
+
+--- src/ingestion/sources/x_api.py ---
+# src/ingestion/sources/x_api.py
+import tweepy
+
+from src.shared.models import ContentItem
+
+
+def ingest(source, since):
+    client = tweepy.Client()
+    query = f"from:{source.url.rstrip('/').split('/')[-1]}"
+    start_time = since
+    response = client.search_recent_tweets(
+        query=query,
+        start_time=start_time,
+        tweet_fields=["created_at", "text"],
+    )
+    items = []
+    if not response.data:
+        return items
+    for tweet in response.data:
+        items.append(ContentItem(
+            id=str(tweet.id),
+            title=tweet.text,
+            source_id=source.id,
+            source_name=source.name,
+            published_date=tweet.created_at,
+            full_text=tweet.text,
+            original_url=f"https://twitter.com/i/web/status/{tweet.id}",
+        ))
+    return items
+
+--- src/ingestion/sources/youtube.py ---
+# src/ingestion/sources/youtube.py
+from datetime import datetime, timezone
+
+from googleapiclient.discovery import build
+
+from src.shared.models import ContentItem
+
+
+def ingest(source, since):
+    channel_id = source.url.rstrip("/").split("/")[-1]
+    youtube = build("youtube", "v3", developerKey=None)
+    request = youtube.search().list(
+        part="snippet",
+        channelId=channel_id,
+        publishedAfter=since.isoformat() if since else None,
+        type="video",
+        maxResults=50,
+    )
+    response = request.execute()
+    items = []
+    for item in response.get("items", []):
+        video_id = item["id"]["videoId"]
+        snippet = item["snippet"]
+        published_at = snippet["publishedAt"]
+        published_date = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        items.append(ContentItem(
+            id=video_id,
+            title=snippet["title"],
+            source_id=source.id,
+            source_name=source.name,
+            published_date=published_date,
+            full_text="",
+            original_url=f"https://www.youtube.com/watch?v={video_id}",
+            content_format="video",
+        ))
+    return items
+
+--- src/shared/models.py ---
+# src/shared/models.py
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+
+@dataclass
+class Source:
+    id: str
+    name: str
+    type: str  # rss / web / x / youtube / podcast
+    url: str
+    category: str
+    active: bool = True
+    priority: int = 1
+
+
+@dataclass
+class ContentItem:
+    id: str
+    title: str
+    source_id: str
+    source_name: str
+    published_date: datetime
+    full_text: str
+    original_url: str
+    content_format: str = "text"  # text / audio / video
+    transcript_status: str = "not_needed"  # pending / completed / failed / not_needed
 
 ## Current Tests
 
-(No test files found)
+
+--- tests/unit/test_pipeline_run_metadata.py ---
+# tests/unit/test_pipeline_run_metadata.py
+import json
+import textwrap
+from unittest.mock import patch, MagicMock
+
+import boto3
+import pytest
+from moto import mock_aws
+
+from src.ingestion.handler import handler
+
+
+@mock_aws
+def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_counts(
+    monkeypatch, tmp_path
+):
+    """
+    After the ingestion handler runs with two active sources (RSS and web),
+    a PipelineRun record is written to S3 at pipeline-runs/{date}/run.json
+    containing sources_attempted == 2, sources_succeeded == 2,
+    items_ingested, transcription_jobs, and delivery_status.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Write a real sources.yaml at the filesystem boundary (not mocking load_sources)
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-rss-1
+            name: AI News RSS
+            type: rss
+            url: https://example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-web-1
+            name: Tech Blog
+            type: web
+            url: https://example.com/blog
+            category: ai
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+
+    # Set up AWS services at the AWS boundary
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
+
+    # Mock feedparser.parse at the external library / network boundary (RSS)
+    fake_rss_feed = MagicMock()
+    fake_rss_feed.bozo = False
+    fake_rss_feed.entries = [
+        MagicMock(
+            title="AI Breakthrough",
+            link="https://example.com/article-1",
+            published_parsed=(2026, 3, 24, 10, 0, 0, 0, 0, 0),
+            summary="An AI breakthrough was announced.",
+        ),
+        MagicMock(
+            title="LLM Update",
+            link="https://example.com/article-2",
+            published_parsed=(2026, 3, 24, 11, 0, 0, 0, 0, 0),
+            summary="A new LLM update was released.",
+        ),
+    ]
+
+    # Mock urllib.request.urlopen at the network boundary (web page fetching)
+    fake_web_html = b"""<html><body>
+      <article>
+        <h1>Tech Post</h1>
+        <time datetime="2026-03-24">March 24, 2026</time>
+        <p>AI developments continue.</p>
+      </article>
+    </body></html>"""
+    fake_http_response = MagicMock()
+    fake_http_response.read.return_value = fake_web_html
+    fake_http_response.__enter__ = lambda s: s
+    fake_http_response.__exit__ = MagicMock(return_value=False)
+
+    with (
+        patch("feedparser.parse", return_value=fake_rss_feed),
+        patch("urllib.request.urlopen", return_value=fake_http_response),
+    ):
+        handler({}, None)
+
+    # PipelineRun record must be written to S3 with correct metadata fields
+    run_key = "pipeline-runs/2026-03-24/run.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=run_key)
+    run_data = json.loads(response["Body"].read())
+
+    assert run_data["sources_attempted"] == 2
+    assert run_data["sources_succeeded"] == 2
+    assert "items_ingested" in run_data
+    assert "transcription_jobs" in run_data
+    assert "delivery_status" in run_data
+
+--- tests/unit/test_x_api_ingestion.py ---
+# tests/unit/test_x_api_ingestion.py
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.ingestion.sources.x_api import ingest
+from src.shared.models import Source
+
+
+def test_x_api_ingestion_returns_content_items_for_recent_tweets():
+    """
+    Given an X source and a since datetime, when ingest() is called,
+    it returns ContentItem objects for tweets published after `since`,
+    each with source_id, title, published_date, original_url, and full_text
+    populated from the tweet data.
+    """
+    source = Source(
+        id="x-source-1",
+        name="Test X Account",
+        type="x",
+        url="https://twitter.com/testaccount",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    tweet_id = "1234567890"
+    tweet_text = "Exciting AI development announced today! #AI"
+    tweet_created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
+
+    mock_tweet = MagicMock()
+    mock_tweet.id = tweet_id
+    mock_tweet.text = tweet_text
+    mock_tweet.created_at = tweet_created_at
+
+    mock_response = MagicMock()
+    mock_response.data = [mock_tweet]
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.search_recent_tweets.return_value = mock_response
+
+    with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client_instance):
+        results = ingest(source, since)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item.source_id == "x-source-1"
+    assert tweet_text in item.title or tweet_text in item.full_text
+    assert item.published_date == tweet_created_at
+    assert tweet_id in item.original_url
+
+--- tests/unit/test_youtube_ingestion.py ---
+# tests/unit/test_youtube_ingestion.py
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from src.ingestion.sources.youtube import ingest
+from src.shared.models import Source
+
+
+def test_youtube_ingestion_returns_video_content_items_for_recent_videos():
+    """
+    Given a YouTube source and a since datetime, when ingest() is called,
+    it returns ContentItem objects with content_format=video for videos
+    published after `since`, each with source_id, title, published_date,
+    and original_url populated from the YouTube API response.
+    """
+    source = Source(
+        id="yt-source-1",
+        name="AI Channel",
+        type="youtube",
+        url="https://www.youtube.com/channel/UC_test_channel_id",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    video_id = "dQw4w9WgXcQ"
+    video_title = "Latest AI Developments Explained"
+    published_at = "2026-03-24T10:00:00Z"
+
+    mock_search_response = {
+        "items": [
+            {
+                "id": {"videoId": video_id},
+                "snippet": {
+                    "title": video_title,
+                    "publishedAt": published_at,
+                    "channelTitle": "AI Channel",
+                },
+            }
+        ]
+    }
+
+    mock_list_request = MagicMock()
+    mock_list_request.execute.return_value = mock_search_response
+
+    mock_search = MagicMock()
+    mock_search.list.return_value = mock_list_request
+
+    mock_youtube_client = MagicMock()
+    mock_youtube_client.search.return_value = mock_search
+
+    with patch(
+        "src.ingestion.sources.youtube.build",
+        return_value=mock_youtube_client,
+    ):
+        results = ingest(source, since)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item.source_id == "yt-source-1"
+    assert item.title == video_title
+    assert item.content_format == "video"
+    assert video_id in item.original_url
+    assert item.published_date == datetime(2026, 3, 24, 10, 0, 0, tzinfo=timezone.utc)
 
 ## Public Interfaces (DO NOT change signatures)
 
@@ -169,7 +599,7 @@ You are a refactoring agent for a TDD-driven project. Your job is to improve cod
 **Purpose**: Detects and collapses duplicate content items that cover the same development across sources.
 
 **Public methods**:
-- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as the tiebreaker; semantic dedup after scoring uses relevance.
+- `deduplicate_by_url(items: list of ContentItem)` → return: List of ContentItem with exact URL duplicates removed (keeps earliest ingested). ⚠️ The spec says "highest-relevance version" for dedup, but URL dedup runs before scoring — this stage uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance.
 - `deduplicate_by_semantics(scored_items: list of ScoredItem)` → return: List of ScoredItem with is_duplicate and duplicate_of fields populated. Items covering the same core development are flagged, retaining the highest-relevance version as primary. Items with genuinely different angles are preserved as distinct.
 
 **Exercised by**: B028, B029, B030
@@ -263,14 +693,18 @@ You are a refactoring agent for a TDD-driven project. Your job is to improve cod
 
 # Constitution Validation
 
-The constitution provided contains only template placeholders with no specific principles defined. The following standard validations apply:
+The constitution contains only template placeholders with no specific principles defined. Standard validations applied:
 
-1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models → ingestion → transcription → scoring → briefing → monitoring).
+1. **Vertical slicing**: Each behavior tests a single observable outcome. Behaviors are ordered to respect task dependencies (shared models -> ingestion -> transcription -> scoring -> briefing -> monitoring).
 2. **Public interface only**: All behaviors are defined against public handler entry points, public module functions, and observable outputs (emails, S3 objects, CloudWatch metrics). No behavior requires accessing internal implementation details.
-3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B007–B010: individual source ingestion) precede composed behaviors (B001: end-to-end delivery), allowing incremental red-green-refactor progression.
-4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue — each behavior defines what to test before the corresponding task is committed.
+3. **Test-driven ordering**: Behaviors are sequenced so that foundational behaviors (B001-B005: briefing delivery) precede source-specific behaviors (B007-B010), which precede hardening behaviors (B013-B018).
+4. **Guardrail compliance**: "Read Before Writing" and "Test Before Commit" guardrails are compatible with the behavior queue.
 
 ⚠️ **Flag**: `deduplicate_by_url` in B028 runs before scoring but the spec (US5.S1) says "only the highest-relevance version appears" — URL dedup cannot use relevance scores. The interface definition notes this: URL dedup uses earliest-ingested as tiebreaker; semantic dedup after scoring uses relevance. Tests should validate both stages separately.
+
+---
+
+**Current progress**: B001-B005 complete, B006 in RED phase. Next behavior to implement: B006 (pipeline run metadata recording). The behavior queue and public interfaces are stable and consistent with all spec artifacts.
 
 ## Guardrails
 
@@ -285,20 +719,38 @@ The constitution provided contains only template placeholders with no specific p
 - **Instruction**: Run required tests and verify outputs
 - **Added after**: Core principle
 
+
+### Sign: Missing sys.path and package stubs cause patch ImportError
+- **Category**: RED-FAILURE
+- **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
+- **Added after**: B006 at 2026-03-25T02:04:10Z
+
+
+### Sign: pip shim broken for older Python, use python3 -m pip
+- **Category**: GREEN-FAILURE
+- **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
+- **Added after**: B009 at 2026-03-25T02:58:00Z
+
 ## Output Format
 
-For each file you refactor, output:
+Edit the files on disk, then confirm what you changed by outputting:
 
 ```
-# Refactored: <file_path>
-
-<complete refactored file content>
+REFACTORED: <file_path>
 ```
 
-If no refactoring is needed, output:
+for each file modified. If no refactoring is needed, output:
 
 ```
 # No Refactoring Needed
 
 The code is clean and well-structured. No changes recommended.
+```
+
+If you encounter a failure that future steps should learn from, output a guardrail block:
+
+```
+### Sign: <short title>
+- **Category**: REFACTOR-FAILURE
+- **Detail**: <what went wrong and how to avoid it>
 ```
