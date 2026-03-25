@@ -40,18 +40,13 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected (RED).
+Test fails as required (stub handler has no `yt_dlp` attribute — the patch target doesn't exist yet, which is the expected RED state).
 
 ```
-FILE: tests/unit/test_podcast_ingestion.py
+FILE: tests/unit/test_youtube_transcription.py
 ```
 
-The test:
-- Mocks `feedparser.parse` at the network boundary with a feed entry that has an enclosure URL
-- Calls `ingest(source, since)` on a podcast-type Source
-- Asserts the result contains one ContentItem with `content_format=audio`, correct `source_id`, `title`, `original_url` (the enclosure URL), and `published_date >= since`
-
-Fails with `NotImplementedError` from the stub — ready for GREEN.
+The test fails with `AttributeError: module 'src.transcription.handler' has no attribute 'yt_dlp'` — correct RED state, since the stub handler has no implementation and doesn't import `yt_dlp`.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -229,10 +224,45 @@ def ingest(source, since):
 
 --- src/ingestion/sources/podcast.py ---
 # src/ingestion/sources/podcast.py
+from datetime import datetime, timezone
+
+import feedparser
+
+from src.shared.models import ContentItem
 
 
 def ingest(source, since):
-    raise NotImplementedError
+    feed = feedparser.parse(source.url)
+    if feed.bozo:
+        return []
+    items = []
+    for entry in feed.entries:
+        published_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        if since and published_date < since:
+            continue
+        enclosures = getattr(entry, "enclosures", [])
+        if not enclosures:
+            continue
+        enclosure_url = enclosures[0].href
+        items.append(ContentItem(
+            id=enclosure_url,
+            title=entry.title,
+            source_id=source.id,
+            source_name=source.name,
+            published_date=published_date,
+            full_text="",
+            original_url=enclosure_url,
+            content_format="audio",
+        ))
+    return items
+
+--- src/transcription/handler.py ---
+# src/transcription/handler.py
+# Stub — implementation added in GREEN phase
+
+
+def handler(event: dict, context: object) -> dict:
+    raise NotImplementedError("transcription handler not yet implemented")
 
 --- src/shared/models.py ---
 # src/shared/models.py

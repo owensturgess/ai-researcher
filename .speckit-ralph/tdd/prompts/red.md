@@ -43,8 +43,8 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B010: Given a configured source list with podcast entries, when daily ingestion runs, new episodes published in the last 24 hours are retrieved from podcast feeds
-Linked tasks: T018, T019
+Behavior B011: Given a YouTube video published in the last 24 hours, the full transcript is available — retrieved via YouTube transcript first, with audio transcription as fallback
+Linked tasks: T020, T032
 
 ## Public Interfaces (from interfaces.md)
 
@@ -402,6 +402,58 @@ def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_count
     assert "items_ingested" in run_data
     assert "transcription_jobs" in run_data
     assert "delivery_status" in run_data
+
+--- tests/unit/test_podcast_ingestion.py ---
+# tests/unit/test_podcast_ingestion.py
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from src.ingestion.sources.podcast import ingest
+from src.shared.models import Source
+
+
+def test_podcast_ingestion_returns_audio_content_items_for_recent_episodes():
+    """
+    Given a podcast source and a since datetime, when ingest() is called,
+    it returns ContentItem objects with content_format=audio for episodes
+    published after `since`, each with source_id, title, published_date,
+    and original_url set to the enclosure (audio file) URL.
+    """
+    source = Source(
+        id="podcast-source-1",
+        name="AI Podcast",
+        type="podcast",
+        url="https://example.com/podcast/feed.xml",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    episode_title = "Episode 42: The Future of Agentic AI"
+    episode_enclosure_url = "https://example.com/podcast/ep42.mp3"
+
+    mock_entry = MagicMock()
+    mock_entry.title = episode_title
+    mock_entry.published_parsed = (2026, 3, 24, 9, 0, 0, 0, 0, 0)
+    mock_entry.enclosures = [
+        MagicMock(href=episode_enclosure_url, type="audio/mpeg")
+    ]
+
+    mock_feed = MagicMock()
+    mock_feed.bozo = False
+    mock_feed.entries = [mock_entry]
+
+    with patch("feedparser.parse", return_value=mock_feed):
+        results = ingest(source, since)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item.source_id == "podcast-source-1"
+    assert item.title == episode_title
+    assert item.content_format == "audio"
+    assert item.original_url == episode_enclosure_url
+    assert item.published_date >= since
 
 --- tests/unit/test_x_api_ingestion.py ---
 # tests/unit/test_x_api_ingestion.py

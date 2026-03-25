@@ -16,3 +16,7 @@ def _stub_module(name: str) -> ModuleType:
 if "tweepy" not in sys.modules:
     tweepy_stub = _stub_module("tweepy")
     tweepy_stub.Client = None  # replaced by patch() in individual tests
+
+if "yt_dlp" not in sys.modules:
+    yt_dlp_stub = _stub_module("yt_dlp")
+    yt_dlp_stub.YoutubeDL = None  # replaced by patch() in individual tests
