@@ -41,18 +41,16 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_pipeline_completion_logging.py
-# tests/unit/test_pipeline_completion_logging.py
+# tests/unit/test_cost_alert_notification.py
+# tests/unit/test_cost_alert_notification.py
 #
-# Behavior B031: When the daily pipeline completes, logs show: sources scanned,
-# items ingested, items scored above threshold, transcription jobs run, and
-# total estimated cost.
+# Behavior B032: When daily costs exceed a configurable threshold, a cost alert
+# notification is sent to configured recipients.
 #
 # Tests the public interface handler(event, context) in src/monitoring/handler.py.
-# After a completed pipeline run record exists in S3, the monitoring handler must
-# emit a log entry containing all five required pipeline completion metrics.
+# When estimated_cost_usd in the PipelineRun record exceeds COST_ALERT_THRESHOLD_USD,
+# the handler must send a cost alert email via SES and return alert_sent=True.
 import json
-import logging
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -62,15 +60,14 @@ from src.monitoring.handler import handler
 
 
 @mock_aws
-def test_pipeline_completion_logs_sources_items_scored_transcriptions_and_cost(
-    monkeypatch, caplog
+def test_cost_alert_sent_to_recipients_when_daily_cost_exceeds_threshold(
+    monkeypatch,
 ):
     """
-    Given a completed PipelineRun record in S3 with known metrics (11 sources
-    scanned, 47 items ingested, 8 items above threshold, 3 transcription jobs,
-    $2.47 estimated cost), when the monitoring handler runs, the log output
-    contains all five values — confirming operators can verify pipeline health
-    from logs alone without consulting the S3 run record directly.
+    Given a completed PipelineRun record with estimated_cost_usd=18.75 and a
+    cost alert threshold of $10.00, when the monitoring handler runs, it sends
+    a cost alert email via SES to the configured alert recipient and returns
+    alert_sent=True — notifying operators that the daily budget was exceeded.
     """
     monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
     monkeypatch.setenv("RUN_DATE", "2026-03-24")
@@ -81,20 +78,20 @@ def test_pipeline_completion_logs_sources_items_scored_transcriptions_and_cost(
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="test-pipeline-bucket")
 
-    # Write a completed PipelineRun record to S3 with known metric values
+    # Pipeline run with cost ($18.75) exceeding the threshold ($10.00)
     pipeline_run = {
         "run_date": "2026-03-24",
         "started_at": "2026-03-24T06:00:00+00:00",
         "completed_at": "2026-03-24T07:30:00+00:00",
         "sources_attempted": 12,
-        "sources_succeeded": 11,
-        "sources_failed": 1,
-        "items_ingested": 47,
-        "items_scored": 47,
-        "items_above_threshold": 8,
-        "items_in_briefing": 8,
-        "transcription_jobs": 3,
-        "estimated_cost_usd": 2.47,
+        "sources_succeeded": 12,
+        "sources_failed": 0,
+        "items_ingested": 120,
+        "items_scored": 120,
+        "items_above_threshold": 10,
+        "items_in_briefing": 10,
+        "transcription_jobs": 15,
+        "estimated_cost_usd": 18.75,
         "delivery_status": "delivered",
     }
     s3.put_object(
@@ -103,12 +100,11 @@ def test_pipeline_completion_logs_sources_items_scored_transcriptions_and_cost(
         Body=json.dumps(pipeline_run),
     )
 
-    # Mock CloudWatch at the AWS service boundary — cost is below threshold
     mock_cloudwatch = MagicMock()
     mock_cloudwatch.put_metric_data.return_value = {}
 
-    # Mock SES at the AWS service boundary — no alert expected (cost < threshold)
     mock_ses = MagicMock()
+    mock_ses.send_email.return_value = {"MessageId": "alert-msg-001"}
 
     moto_boto3_client = boto3.client
 
@@ -120,42 +116,27 @@ def test_pipeline_completion_logs_sources_items_scored_transcriptions_and_cost(
         return moto_boto3_client(service, **kw)
 
     with patch("src.monitoring.handler.boto3.client", side_effect=client_factory):
-        with caplog.at_level(logging.INFO):
-            result = handler({}, None)
+        result = handler({}, None)
 
-    assert result["status"] == "ok"
-
-    # Collect all log text for inspection
-    all_log_messages = " ".join(r.message for r in caplog.records)
-
-    # 1. Sources scanned (sources_succeeded=11)
-    assert "11" in all_log_messages, (
-        f"Logs must include sources scanned count (11). "
-        f"Got log messages: {all_log_messages!r}"
+    # Handler must report that an alert was sent
+    assert result.get("alert_sent") is True, (
+        f"Expected alert_sent=True when cost $18.75 exceeds threshold $10.00, "
+        f"got: {result.get('alert_sent')!r}"
     )
 
-    # 2. Items ingested (items_ingested=47)
-    assert "47" in all_log_messages, (
-        f"Logs must include items ingested count (47). "
-        f"Got log messages: {all_log_messages!r}"
+    # SES send_email must have been called at least once (the cost alert)
+    assert mock_ses.send_email.called, (
+        "SES send_email was never called — cost alert was not sent despite "
+        "estimated_cost_usd ($18.75) exceeding COST_ALERT_THRESHOLD_USD ($10.00)."
     )
 
-    # 3. Items scored above threshold (items_above_threshold=8)
-    assert "8" in all_log_messages, (
-        f"Logs must include items above threshold count (8). "
-        f"Got log messages: {all_log_messages!r}"
-    )
-
-    # 4. Transcription jobs run (transcription_jobs=3)
-    assert "3" in all_log_messages, (
-        f"Logs must include transcription jobs count (3). "
-        f"Got log messages: {all_log_messages!r}"
-    )
-
-    # 5. Total estimated cost ($2.47)
-    assert "2.47" in all_log_messages, (
-        f"Logs must include estimated cost (2.47). "
-        f"Got log messages: {all_log_messages!r}"
+    # The alert must be addressed to the configured recipient
+    call_kwargs = mock_ses.send_email.call_args
+    # Support both positional and keyword argument styles
+    call_args_flat = str(call_kwargs)
+    assert "admin@example.com" in call_args_flat, (
+        f"Cost alert email must be sent to ALERT_RECIPIENT 'admin@example.com'. "
+        f"SES call args: {call_kwargs}"
     )
 
 ## Public Interfaces (from interfaces.md)

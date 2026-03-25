@@ -45,6 +45,7 @@ def handler(event: dict, context: object) -> dict:
     )
 
     threshold = float(os.environ.get("COST_ALERT_THRESHOLD_USD", "10.00"))
+    alert_sent = False
     if estimated_cost_usd > threshold:
         ses = boto3.client("ses")
         ses.send_email(
@@ -55,5 +56,6 @@ def handler(event: dict, context: object) -> dict:
                 "Body": {"Text": {"Data": f"Estimated cost ${estimated_cost_usd:.2f} exceeds threshold ${threshold:.2f}"}},
             },
         )
+        alert_sent = True
 
-    return {"status": "ok"}
+    return {"status": "ok", "alert_sent": alert_sent}

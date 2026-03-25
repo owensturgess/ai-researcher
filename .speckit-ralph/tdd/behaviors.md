@@ -62,7 +62,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
 | B031 | When the daily pipeline completes, logs show: sources scanned, items ingested, items scored above threshold, transcription jobs run, and total estimated cost | US6.S1 | T044, T046 | complete |
-| B032 | When daily costs exceed a configurable threshold, a cost alert notification is sent to configured recipients | US6.S2 | T045 | queued |
+| B032 | When daily costs exceed a configurable threshold, a cost alert notification is sent to configured recipients | US6.S2 | T045 | complete |
 | B033 | After 7 consecutive days, an operator can see delivery reliability (% on-time) and average cost per run | US6.S3 | T047, T048 | queued |
 | B034 | A source that fails for 3 consecutive days triggers a warning in operator metrics | Edge Case | T052 | queued |
 | B035 | CloudWatch custom metrics are published to the "AgenticSDLCIntel" namespace with dashboard and alarms | US6.S1 | T047, T048 | queued |
