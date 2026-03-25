@@ -15,7 +15,8 @@ def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    return [s for s in config.get("sources", []) if s.get("active", True)]
+    sources = [s for s in config.get("sources", []) if s.get("active", True)]
+    return sorted(sources, key=lambda s: s.get("priority", 1))
 
 
 def handler(event, context):

@@ -28,7 +28,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 | B015 | When the YouTube API quota approaches its daily limit, YouTube queries stop and the pipeline continues with other source types | Edge Case | T029 | complete |
 | B016 | When a YouTube video has no transcript and transcription fails, the item is included with a "transcript unavailable" flag; title, source, and link are still provided | Edge Case | T032 | complete |
 | B017 | When a podcast episode exceeds 2 hours and would exceed the daily transcription budget cap, it is flagged as "transcript unavailable" with the link still included | Edge Case | T033 | complete |
-| B018 | Sources are processed in priority order so highest-value sources are ingested first when rate limits constrain volume | FR-018 | T030 | queued |
+| B018 | Sources are processed in priority order so highest-value sources are ingested first when rate limits constrain volume | FR-018 | T030 | complete |
 
 ## User Story 3: Context-Aware Relevance Scoring
 

@@ -377,3 +377,16 @@
 [2026-03-24 20:35:43] VERIFY_GREEN START 
 [2026-03-24 20:35:45] VERIFY_GREEN PASS duration=2s B017
 [2026-03-24 20:35:45] PROGRESS START 
+[2026-03-24 20:35:46] PROGRESS PASS behavior=B017 description=When a podcast episode exceeds 2 hours and would exceed the daily transcription budget cap, it is flagged as "transcript unavailable" with the link still included
+[2026-03-24 20:35:46] PROGRESS PASS duration=1s B017 complete
+[2026-03-24 20:35:46] RED START 
+[2026-03-24 20:36:54] RED PASS duration=68s Test written for B018
+[2026-03-24 20:36:54] VERIFY_RED START 
+[2026-03-24 20:36:58] VERIFY_RED PASS duration=4s B018
+[2026-03-24 20:36:58] VALIDATE START 
+[2026-03-24 20:37:35] VALIDATE PASS duration=37s Test approved for B018
+[2026-03-24 20:37:35] GREEN START 
+[2026-03-24 20:38:14] GREEN PASS duration=39s Implementation written for B018
+[2026-03-24 20:38:14] VERIFY_GREEN START 
+[2026-03-24 20:38:17] VERIFY_GREEN PASS duration=3s B018
+[2026-03-24 20:38:17] PROGRESS START 

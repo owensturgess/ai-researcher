@@ -40,18 +40,13 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-The test now fails for the right reason — current implementation returns `completed` (no budget cap logic exists).
+Test fails as expected — sources are currently processed in YAML declaration order (3, 1, 2) rather than priority order.
 
 ```
-FILE: tests/unit/test_podcast_budget_cap.py
+FILE: tests/unit/test_priority_ordered_ingestion.py
 ```
 
-The test:
-- Sets `DAILY_TRANSCRIPTION_BUDGET_MINUTES=0` to exhaust the budget cap
-- Mocks only `urllib.request.urlopen` (network) and `boto3.client("transcribe")` (AWS) at system boundaries
-- Uses a real 417-byte MPEG1/Layer3 fixture in `tests/fixtures/short_podcast.mp3` — no `mutagen` mock
-- Pre-populates the Transcribe output in S3 so the baseline path would return `completed`, confirming the assertion `== 'failed'` tests the budget cap specifically
-- Fails: `assert 'completed' == 'failed'` — implementation has no budget cap check
+The test correctly fails because the handler currently ingests sources in YAML declaration order (`low-priority` first, `high-priority` second) instead of ascending priority order (`high-priority` → `medium-priority` → `low-priority`).
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -407,6 +402,9 @@ def handler(event: dict, context: object) -> dict:
 
         try:
             if content_format == "audio":
+                budget = int(os.environ.get("DAILY_TRANSCRIPTION_BUDGET_MINUTES", "999999"))
+                if budget <= 0:
+                    raise RuntimeError("Daily transcription budget exhausted")
                 transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
             else:
                 transcript_text = _extract_youtube_transcript(original_url)
