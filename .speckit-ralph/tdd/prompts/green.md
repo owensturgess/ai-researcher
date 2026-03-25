@@ -40,15 +40,18 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails exactly as expected. The business-strategy item gets flagged `is_duplicate=True` because the current prompt omits `scoring_reasoning`, so the mock returns `is_duplicate: true`.
+Test fails at the right point — assertions 1 and 2 pass (the existing implementation correctly selects the primary and flags all 4 duplicates), but assertion 3 fails because `ScoredItem` has no `also_reported_by` field.
 
 ```
-FILE: tests/unit/test_semantic_deduplication_different_angles.py
+FILE: tests/unit/test_deduplication_five_sources.py
 ```
 
-**What the test verifies**: When two items share a topic but have genuinely different angles documented in `scoring_reasoning`, the LLM deduplication prompt must include `scoring_reasoning` so the LLM can distinguish "same development reported twice" from "same topic, different angle." The mock returns `is_duplicate: true` whenever reasoning is absent from the prompt — which is the current state — causing the business-strategy item to be incorrectly flagged as a duplicate.
+**What the test covers**: When 5 items cover the same development, `deduplicate_by_semantics()` must:
+1. ✅ Keep only the highest-scoring item as non-duplicate (passes with current impl)
+2. ✅ Flag all 4 others with `is_duplicate=True` and correct `duplicate_of` (passes with current impl)
+3. ❌ Set `primary.also_reported_by` to a list of the 4 duplicate IDs (fails — new behavior)
 
-**Fix required**: Update `_are_duplicates` in `src/scoring/deduplication.py` to include `item.scoring_reasoning` in the prompt sent to Bedrock.
+**To go GREEN**: Add `also_reported_by: list = field(default_factory=list)` to `ScoredItem` in `models.py`, and populate it inside `deduplicate_by_semantics()` when flagging duplicates.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -643,7 +646,9 @@ import boto3
 def _are_duplicates(bedrock, item_a, item_b):
     prompt = (
         f"Item A summary: {item_a.executive_summary}\n"
-        f"Item B summary: {item_b.executive_summary}\n\n"
+        f"Item A reasoning: {item_a.scoring_reasoning}\n"
+        f"Item B summary: {item_b.executive_summary}\n"
+        f"Item B reasoning: {item_b.scoring_reasoning}\n\n"
         "Do these items cover the same core development? "
         "Respond with JSON: {\"is_duplicate\": true} or {\"is_duplicate\": false}."
     )

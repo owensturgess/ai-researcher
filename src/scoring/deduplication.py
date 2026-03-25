@@ -42,5 +42,6 @@ def deduplicate_by_semantics(scored_items):
             if _are_duplicates(bedrock, items[i], items[j]):
                 items[j].is_duplicate = True
                 items[j].duplicate_of = items[i].content_item_id
+                items[i].also_reported_by.append(items[j].content_item_id)
 
     return items

@@ -38,3 +38,4 @@ class ScoredItem:
     scoring_reasoning: str
     is_duplicate: bool = False
     duplicate_of: Optional[str] = None
+    also_reported_by: list = field(default_factory=list)
