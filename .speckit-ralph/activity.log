@@ -327,3 +327,16 @@
 [2026-03-24 20:22:06] VERIFY_GREEN START 
 [2026-03-24 20:22:08] VERIFY_GREEN PASS duration=2s B014
 [2026-03-24 20:22:08] PROGRESS START 
+[2026-03-24 20:22:09] PROGRESS PASS behavior=B014 description=When the X API rate limit is hit mid-ingestion, the system logs the event, processes already-retrieved sources, and continues with other source types
+[2026-03-24 20:22:09] PROGRESS PASS duration=1s B014 complete
+[2026-03-24 20:22:09] RED START 
+[2026-03-24 20:23:15] RED PASS duration=66s Test written for B015
+[2026-03-24 20:23:15] VERIFY_RED START 
+[2026-03-24 20:23:18] VERIFY_RED PASS duration=3s B015
+[2026-03-24 20:23:18] VALIDATE START 
+[2026-03-24 20:23:45] VALIDATE PASS duration=27s Test approved for B015
+[2026-03-24 20:23:45] GREEN START 
+[2026-03-24 20:24:10] GREEN PASS duration=25s Implementation written for B015
+[2026-03-24 20:24:10] VERIFY_GREEN START 
+[2026-03-24 20:24:12] VERIFY_GREEN PASS duration=2s B015
+[2026-03-24 20:24:12] PROGRESS START 

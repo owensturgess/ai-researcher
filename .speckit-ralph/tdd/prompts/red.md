@@ -43,98 +43,8 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B014: When the X API rate limit is hit mid-ingestion, the system logs the event, processes already-retrieved sources, and continues with other source types
-Linked tasks: T028
-
-## Previous Validation Feedback (MUST address these issues)
-GATE: VERIFY_RED for B014
-CHECK 1 FAIL: New test PASSED but should have FAILED.
-The test at tests/unit/test_x_api_rate_limit_mid_ingestion.py already passes without new implementation.
-This means the test is not testing new behavior — it's either trivial or testing existing functionality.
-Test output:
-============================= test session starts ==============================
-platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0 -- /Library/Frameworks/Python.framework/Versions/3.14/bin/python3
-cachedir: .pytest_cache
-rootdir: /Users/ocs/Documents/GitHub/ai-researcher
-plugins: cov-7.0.0
-collecting ... collected 1 item
-
-tests/unit/test_x_api_rate_limit_mid_ingestion.py::test_x_api_rate_limit_logs_event_preserves_retrieved_items_and_continues_other_sources PASSED
-
-============================== 1 passed in 0.77s ===============================
-CHECK 2 FAIL: Full test suite FAILED — existing tests are broken.
-Test output:
-============================= test session starts ==============================
-platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
-rootdir: /Users/ocs/Documents/GitHub/ai-researcher
-plugins: cov-7.0.0
-collected 7 items
-
-tests/unit/test_ingestion_error_isolation.py .                           [ 14%]
-tests/unit/test_pipeline_run_metadata.py .                               [ 28%]
-tests/unit/test_podcast_ingestion.py .                                   [ 42%]
-tests/unit/test_podcast_transcription.py .                               [ 57%]
-tests/unit/test_x_api_ingestion.py F                                     [ 71%]
-tests/unit/test_youtube_ingestion.py .                                   [ 85%]
-tests/unit/test_youtube_transcription.py .                               [100%]
-
-=================================== FAILURES ===================================
-_________ test_x_api_ingestion_returns_content_items_for_recent_tweets _________
-
-    def test_x_api_ingestion_returns_content_items_for_recent_tweets():
-        """
-        Given an X source and a since datetime, when ingest() is called,
-        it returns ContentItem objects for tweets published after `since`,
-        each with source_id, title, published_date, original_url, and full_text
-        populated from the tweet data.
-        """
-        source = Source(
-            id="x-source-1",
-            name="Test X Account",
-            type="x",
-            url="https://twitter.com/testaccount",
-            category="ai",
-            active=True,
-            priority=1,
-        )
-        since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
-    
-        tweet_id = "1234567890"
-        tweet_text = "Exciting AI development announced today! #AI"
-        tweet_created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
-    
-        mock_tweet = MagicMock()
-        mock_tweet.id = tweet_id
-        mock_tweet.text = tweet_text
-        mock_tweet.created_at = tweet_created_at
-    
-        mock_response = MagicMock()
-        mock_response.data = [mock_tweet]
-    
-        mock_client_instance = MagicMock()
-        mock_client_instance.search_recent_tweets.return_value = mock_response
-    
-        with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client_instance):
->           results = ingest(source, since)
-                      ^^^^^^^^^^^^^^^^^^^^^
-
-tests/unit/test_x_api_ingestion.py:45: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-source = Source(id='x-source-1', name='Test X Account', type='x', url='https://twitter.com/testaccount', category='ai', active=True, priority=1)
-since = datetime.datetime(2026, 3, 23, 0, 0, tzinfo=datetime.timezone.utc)
-
-    def ingest(source, since):
-        client = tweepy.Client()
->       username = source["url"].rstrip("/").split("/")[-1]
-                   ^^^^^^^^^^^^^
-E       TypeError: 'Source' object is not subscriptable
-
-src/ingestion/sources/x_api.py:7: TypeError
-=========================== short test summary info ============================
-FAILED tests/unit/test_x_api_ingestion.py::test_x_api_ingestion_returns_content_items_for_recent_tweets
-========================= 1 failed, 6 passed in 1.36s ==========================
-RESULT: FAIL
+Behavior B015: When the YouTube API quota approaches its daily limit, YouTube queries stop and the pipeline continues with other source types
+Linked tasks: T029
 
 ## Public Interfaces (from interfaces.md)
 
@@ -838,6 +748,80 @@ def test_youtube_ingestion_returns_video_content_items_for_recent_videos():
     assert item.content_format == "video"
     assert video_id in item.original_url
     assert item.published_date == datetime(2026, 3, 24, 10, 0, 0, tzinfo=timezone.utc)
+
+--- tests/unit/test_x_api_rate_limit_mid_ingestion.py ---
+# tests/unit/test_x_api_rate_limit_mid_ingestion.py
+import logging
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import tweepy
+
+from src.ingestion.sources.x_api import ingest
+from src.shared.models import Source
+
+
+def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(caplog):
+    """
+    Given an X source being ingested across multiple pages, when the X API
+    raises TooManyRequests on the second page (rate limit hit mid-ingestion),
+    ingest() returns the ContentItems already retrieved from the first page
+    and emits a warning log containing "rate limit".
+    """
+    source = Source(
+        id="x-source-1",
+        name="Test X Account",
+        type="x",
+        url="https://twitter.com/testaccount",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    # First page: one tweet retrieved successfully, meta indicates more pages exist
+    mock_tweet = MagicMock()
+    mock_tweet.id = "tweet-page1-001"
+    mock_tweet.text = "First page tweet about AI developments"
+    mock_tweet.created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
+
+    first_page_meta = MagicMock()
+    first_page_meta.next_token = "page2_token"
+
+    first_page_response = MagicMock()
+    first_page_response.data = [mock_tweet]
+    first_page_response.meta = first_page_meta
+
+    # Construct a tweepy TooManyRequests exception for the second page
+    mock_rate_limit_response = MagicMock()
+    mock_rate_limit_response.status_code = 429
+    mock_rate_limit_response.headers = {}
+    mock_rate_limit_response.json.return_value = {}
+    mock_rate_limit_response.text = "Too Many Requests"
+
+    call_count = 0
+
+    def search_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return first_page_response
+        raise tweepy.errors.TooManyRequests(mock_rate_limit_response)
+
+    mock_client = MagicMock()
+    mock_client.search_recent_tweets.side_effect = search_side_effect
+
+    with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client):
+        with caplog.at_level(logging.WARNING):
+            results = ingest(source, since)
+
+    # Items from the first page must be returned despite the rate limit
+    assert len(results) == 1
+    assert results[0].source_id == "x-source-1"
+
+    # A rate-limit-specific warning must be logged
+    rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
+    assert len(rate_limit_logs) >= 1
 
 --- tests/unit/test_podcast_transcription.py ---
 # tests/unit/test_podcast_transcription.py

@@ -40,96 +40,17 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Results are exactly right:
-- 7 existing tests pass (including `test_x_api_ingestion.py` which was previously broken)
-- New B014 test fails with `AssertionError: 0 >= 1` — no rate-limit log emitted because pagination isn't implemented, so `TooManyRequests` is never raised and never logged
+The test fails correctly in RED state. The current `ingest()` makes only one API call and has no quota error handling or warning logging.
 
 ```
-FILE: tests/unit/test_x_api_rate_limit_mid_ingestion.py
+FILE: tests/unit/test_youtube_quota_limit.py
 ```
 
-**What was fixed:** `x_api.py` had two bugs from a prior GREEN step (`source["url"]`/`source["id"]` dict access on a dataclass, and returning plain dicts instead of `ContentItem` objects). Fixed both to restore the full suite.
+The test fails because:
+1. The implementation never encounters the quota error (no pagination, single `execute()` call)
+2. No quota warning is ever logged
 
-**Why the B014 test fails:** The current `ingest()` makes a single `search_recent_tweets` call with no pagination loop. The mock's first page response has `meta.next_token = "page2_token"`, but because no pagination is implemented, the second call (which would raise `TooManyRequests`) is never made, so no rate-limit warning is logged. The assertion `len(rate_limit_logs) >= 1` → `0 >= 1` fails.
-
-The GREEN step must implement: paginated fetching that catches `tweepy.errors.TooManyRequests`, logs a `"rate limit"` warning, and returns already-retrieved items.
-
-## Previous GREEN Gate Failure (MUST fix these issues)
-GATE: VERIFY_GREEN for B014
-CHECK FAIL: Test suite FAILED after implementation.
-Test output:
-============================= test session starts ==============================
-platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
-rootdir: /Users/ocs/Documents/GitHub/ai-researcher
-plugins: cov-7.0.0
-collected 8 items
-
-tests/unit/test_ingestion_error_isolation.py .                           [ 12%]
-tests/unit/test_pipeline_run_metadata.py .                               [ 25%]
-tests/unit/test_podcast_ingestion.py .                                   [ 37%]
-tests/unit/test_podcast_transcription.py .                               [ 50%]
-tests/unit/test_x_api_ingestion.py F                                     [ 62%]
-tests/unit/test_x_api_rate_limit_mid_ingestion.py .                      [ 75%]
-tests/unit/test_youtube_ingestion.py .                                   [ 87%]
-tests/unit/test_youtube_transcription.py .                               [100%]
-
-=================================== FAILURES ===================================
-_________ test_x_api_ingestion_returns_content_items_for_recent_tweets _________
-
-    def test_x_api_ingestion_returns_content_items_for_recent_tweets():
-        """
-        Given an X source and a since datetime, when ingest() is called,
-        it returns ContentItem objects for tweets published after `since`,
-        each with source_id, title, published_date, original_url, and full_text
-        populated from the tweet data.
-        """
-        source = Source(
-            id="x-source-1",
-            name="Test X Account",
-            type="x",
-            url="https://twitter.com/testaccount",
-            category="ai",
-            active=True,
-            priority=1,
-        )
-        since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
-    
-        tweet_id = "1234567890"
-        tweet_text = "Exciting AI development announced today! #AI"
-        tweet_created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
-    
-        mock_tweet = MagicMock()
-        mock_tweet.id = tweet_id
-        mock_tweet.text = tweet_text
-        mock_tweet.created_at = tweet_created_at
-    
-        mock_response = MagicMock()
-        mock_response.data = [mock_tweet]
-    
-        mock_client_instance = MagicMock()
-        mock_client_instance.search_recent_tweets.return_value = mock_response
-    
-        with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client_instance):
->           results = ingest(source, since)
-                      ^^^^^^^^^^^^^^^^^^^^^
-
-tests/unit/test_x_api_ingestion.py:45: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-source = Source(id='x-source-1', name='Test X Account', type='x', url='https://twitter.com/testaccount', category='ai', active=True, priority=1)
-since = datetime.datetime(2026, 3, 23, 0, 0, tzinfo=datetime.timezone.utc)
-
-    def ingest(source, since):
-        client = tweepy.Client()
->       username = source["url"].rstrip("/").split("/")[-1]
-                   ^^^^^^^^^^^^^
-E       TypeError: 'Source' object is not subscriptable
-
-src/ingestion/sources/x_api.py:7: TypeError
-=========================== short test summary info ============================
-FAILED tests/unit/test_x_api_ingestion.py::test_x_api_ingestion_returns_content_items_for_recent_tweets
-========================= 1 failed, 7 passed in 1.49s ==========================
-RESULT: FAIL
+The GREEN implementation will need to: add pagination support, catch `HttpError` with status 403 (quotaExceeded), log a warning, and return partial results instead of propagating the exception.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -246,33 +167,56 @@ def ingest(source, since):
 
 --- src/ingestion/sources/x_api.py ---
 # src/ingestion/sources/x_api.py
+import logging
+
 import tweepy
 
 from src.shared.models import ContentItem
+
+logger = logging.getLogger(__name__)
 
 
 def ingest(source, since):
     client = tweepy.Client()
     username = source.url.rstrip("/").split("/")[-1]
     query = f"from:{username}"
-    response = client.search_recent_tweets(
-        query=query,
-        start_time=since,
-        tweet_fields=["created_at", "text"],
-    )
     items = []
-    if not response.data:
-        return items
-    for tweet in response.data:
-        items.append(ContentItem(
-            id=str(tweet.id),
-            title=tweet.text,
-            source_id=source.id,
-            source_name=source.name,
-            published_date=tweet.created_at,
-            full_text=tweet.text,
-            original_url=f"https://twitter.com/i/web/status/{tweet.id}",
-        ))
+    next_token = None
+
+    while True:
+        kwargs = dict(
+            query=query,
+            start_time=since,
+            tweet_fields=["created_at", "text"],
+        )
+        if next_token:
+            kwargs["next_token"] = next_token
+
+        try:
+            response = client.search_recent_tweets(**kwargs)
+        except tweepy.errors.TooManyRequests:
+            logger.warning("rate limit hit mid-ingestion for source %s; returning partial results", source.id)
+            break
+
+        if response.data:
+            for tweet in response.data:
+                items.append(ContentItem(
+                    id=str(tweet.id),
+                    title=tweet.text,
+                    source_id=source.id,
+                    source_name=source.name,
+                    published_date=tweet.created_at,
+                    full_text=tweet.text,
+                    original_url=f"https://twitter.com/i/web/status/{tweet.id}",
+                ))
+
+        # next_token must be a real string to continue pagination
+        meta = getattr(response, "meta", None)
+        token = getattr(meta, "next_token", None) if meta is not None else None
+        if not isinstance(token, str) or not token:
+            break
+        next_token = token
+
     return items
 
 --- src/ingestion/sources/youtube.py ---
