@@ -27,6 +27,30 @@ You MUST use your file-writing tools to edit implementation files directly on di
 ## Current Implementation
 
 
+--- src/ingestion/config.py ---
+# src/ingestion/config.py
+import yaml
+
+from src.shared.models import Source
+
+
+def load_sources(config_path):
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return [
+        Source(
+            id=s["id"],
+            name=s["name"],
+            type=s["type"],
+            url=s["url"],
+            category=s.get("category", ""),
+            active=s.get("active", True),
+            priority=s.get("priority", 1),
+        )
+        for s in config.get("sources", [])
+        if s.get("active", True)
+    ]
+
 --- src/ingestion/handler.py ---
 # src/ingestion/handler.py
 import json
@@ -84,6 +108,7 @@ def handler(event, context):
     run_record = {
         "sources_attempted": sources_attempted,
         "sources_succeeded": sources_succeeded,
+        "source_ids_attempted": [s.get("id") for s in sources],
         "items_ingested": len(all_items),
         "transcription_jobs": 0,
         "delivery_status": "pending",
@@ -479,6 +504,35 @@ import os
 import boto3
 
 
+def _score_item(bedrock, context_prompt, item):
+    user_text = (
+        f"Title: {item.get('title', '')}\n"
+        f"Content: {item.get('full_text', '')}\n\n"
+        "Respond with JSON containing a 'score' field (integer 0-100)."
+    )
+
+    request_body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 256,
+        "temperature": 0,
+        "system": context_prompt,
+        "messages": [{"role": "user", "content": user_text}],
+    })
+
+    response = bedrock.invoke_model(
+        modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        body=request_body,
+        contentType="application/json",
+        accept="application/json",
+    )
+
+    response_body = json.loads(response["body"].read())
+    text = response_body["content"][0]["text"]
+    parsed = json.loads(text)
+    urgency = parsed.get("urgency", "informational")
+    return parsed["score"], urgency
+
+
 def handler(event, context):
     bucket = os.environ["PIPELINE_BUCKET"]
     run_date = os.environ.get("RUN_DATE", "")
@@ -490,7 +544,6 @@ def handler(event, context):
     s3 = boto3.client("s3")
     bedrock = boto3.client("bedrock-runtime")
 
-    # List all raw items for this run date
     paginator = s3.get_paginator("list_objects_v2")
     pages = paginator.paginate(Bucket=bucket, Prefix=f"raw/{run_date}/")
 
@@ -521,34 +574,6 @@ def handler(event, context):
                 items_above_threshold += 1
 
     return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
-
-
-def _score_item(bedrock, context_prompt, item):
-    user_text = (
-        f"Title: {item.get('title', '')}\n"
-        f"Content: {item.get('full_text', '')}\n\n"
-        "Respond with JSON containing a 'score' field (integer 0-100)."
-    )
-
-    request_body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 256,
-        "system": context_prompt,
-        "messages": [{"role": "user", "content": user_text}],
-    })
-
-    response = bedrock.invoke_model(
-        modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
-        body=request_body,
-        contentType="application/json",
-        accept="application/json",
-    )
-
-    response_body = json.loads(response["body"].read())
-    text = response_body["content"][0]["text"]
-    parsed = json.loads(text)
-    urgency = parsed.get("urgency", "informational")
-    return parsed["score"], urgency
 
 ## Current Tests
 
@@ -818,6 +843,212 @@ def test_youtube_transcript_retrieved_via_ytdlp_subtitles_and_written_to_s3(
 
     assert subtitle_text in stored_transcript
     assert result["transcript_status"] == "completed"
+
+--- tests/unit/test_source_removal_stops_ingestion.py ---
+# tests/unit/test_source_removal_stops_ingestion.py
+#
+# Behavior B024: Given a source is removed from the configuration file,
+# content from that source is no longer ingested on the next run.
+#
+# This test verifies that the pipeline run record written to S3 contains an
+# explicit list of source IDs that were attempted (source_ids_attempted), and
+# that the removed source's ID is absent from that list while the remaining
+# source's ID is present.  The handler currently writes only counts
+# (sources_attempted, sources_succeeded) — not an ID list — so this test fails
+# until source_ids_attempted is added to the run record.
+import json
+import textwrap
+from unittest.mock import patch, MagicMock
+
+import boto3
+from moto import mock_aws
+
+from src.ingestion.handler import handler
+
+
+@mock_aws
+def test_removed_source_id_is_absent_from_run_record_source_id_list(
+    monkeypatch, tmp_path
+):
+    """
+    Given a config file that contains only src-remaining-001 (src-removed-002
+    was previously active but has been removed from the YAML), when the
+    ingestion handler runs, the pipeline run record written to S3 includes a
+    source_ids_attempted list that contains src-remaining-001 and does NOT
+    contain src-removed-002 — giving operators an explicit record of which
+    sources participated in each run.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Config after removal: only src-remaining-001 is present
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-remaining-001
+            name: Remaining AI Feed
+            type: rss
+            url: https://remaining.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
+
+    fake_feed = MagicMock()
+    fake_feed.bozo = False
+    fake_feed.entries = []
+
+    with patch("feedparser.parse", return_value=fake_feed):
+        handler({}, None)
+
+    # Read the pipeline run record written to S3
+    response = s3.get_object(
+        Bucket="test-pipeline-bucket",
+        Key="pipeline-runs/2026-03-24/run.json",
+    )
+    run_data = json.loads(response["Body"].read())
+
+    # The run record must include an explicit list of source IDs attempted
+    assert "source_ids_attempted" in run_data, (
+        "pipeline run record missing 'source_ids_attempted' field — "
+        "operators cannot verify which sources ran vs. which were removed"
+    )
+
+    source_ids = run_data["source_ids_attempted"]
+    assert "src-remaining-001" in source_ids, (
+        f"src-remaining-001 should be in source_ids_attempted but got: {source_ids}"
+    )
+    assert "src-removed-002" not in source_ids, (
+        f"src-removed-002 must not appear in source_ids_attempted after removal, got: {source_ids}"
+    )
+
+--- tests/unit/test_scoring_reliability.py ---
+# tests/unit/test_scoring_reliability.py
+import json
+from unittest.mock import MagicMock, patch
+
+import boto3
+from moto import mock_aws
+
+from src.scoring.handler import handler
+
+# The scoring handler must call Bedrock with temperature=0 so that the same
+# content item receives consistent scores across consecutive daily runs.
+# Without temperature=0, LLM outputs are non-deterministic and scores can vary
+# wildly between runs — violating the ±10 point reliability requirement.
+
+
+@mock_aws
+def test_same_content_item_scores_consistently_across_two_consecutive_days(
+    monkeypatch, tmp_path
+):
+    """
+    Given the same content item is ingested and scored on two consecutive days,
+    when the scoring handler runs each day, the two resulting relevance scores
+    differ by no more than ±10 points — confirmed by the handler passing
+    temperature=0 to Bedrock so the LLM produces deterministic output.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RELEVANCE_THRESHOLD", "0")  # score all items
+
+    context_file = tmp_path / "context-prompt.txt"
+    context_file.write_text(
+        "Score content for relevance to agentic SDLC transformation goals."
+    )
+    monkeypatch.setenv("CONTEXT_PROMPT_PATH", str(context_file))
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    # The same item ingested on two consecutive days
+    item = {
+        "id": "item-reliability-001",
+        "title": "Claude 4 Released with Agentic Capabilities",
+        "source_id": "src-rss-1",
+        "source_name": "AI News",
+        "published_date": "2026-03-24T08:00:00+00:00",
+        "full_text": "Anthropic released Claude 4 with major agentic improvements.",
+        "original_url": "https://example.com/claude-4",
+        "content_format": "text",
+        "transcript_status": "not_needed",
+    }
+
+    for run_date in ("2026-03-24", "2026-03-25"):
+        s3.put_object(
+            Bucket="test-pipeline-bucket",
+            Key=f"raw/{run_date}/{item['source_id']}/{item['id']}.json",
+            Body=json.dumps(item),
+        )
+
+    # Bedrock mock: when temperature=0 is present both calls return 75 (consistent).
+    # When temperature is absent or non-zero the mock alternates between 30 and 75
+    # on successive calls, simulating the non-determinism that arises without
+    # temperature pinning. This makes the test fail (RED) until the handler passes
+    # temperature=0 so the same score is produced across consecutive daily runs.
+    call_counter = {"n": 0}
+    non_deterministic_scores = [30, 75]  # differ by 45 — exceeds ±10 threshold
+
+    def bedrock_invoke_side_effect(modelId, body, **kwargs):
+        request = json.loads(body)
+        uses_zero_temp = request.get("temperature", None) == 0
+        if uses_zero_temp:
+            score = 75  # deterministic when temperature=0
+        else:
+            # Alternate scores to simulate non-determinism without temperature pinning
+            score = non_deterministic_scores[call_counter["n"] % len(non_deterministic_scores)]
+            call_counter["n"] += 1
+        response_body = json.dumps({
+            "score": score,
+            "urgency": "worth_discussing",
+            "relevance_tag": "AI Tools",
+            "summary": "Agentic AI release.",
+            "reasoning": "Directly relevant to agentic SDLC goals.",
+        })
+        mock_stream = MagicMock()
+        mock_stream.read.return_value = json.dumps({
+            "content": [{"text": response_body}]
+        }).encode("utf-8")
+        return {"body": mock_stream}
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.side_effect = bedrock_invoke_side_effect
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service in ("bedrock-runtime", "bedrock"):
+            return mock_bedrock
+        return moto_boto3_client(service, **kw)
+
+    scores = []
+    for run_date in ("2026-03-24", "2026-03-25"):
+        monkeypatch.setenv("RUN_DATE", run_date)
+        with patch("src.scoring.handler.boto3.client", side_effect=client_factory):
+            handler({}, None)
+
+        key = f"scored/{run_date}/{item['id']}.json"
+        response = s3.get_object(Bucket="test-pipeline-bucket", Key=key)
+        scored = json.loads(response["Body"].read())
+        scores.append(scored["relevance_score"])
+
+    # Both daily scores must be within ±10 points of each other
+    score_day1, score_day2 = scores
+    assert abs(score_day1 - score_day2) <= 10, (
+        f"Scores differ by {abs(score_day1 - score_day2)} points "
+        f"(day1={score_day1}, day2={score_day2}) — exceeds ±10 reliability threshold. "
+        "Ensure the scoring handler passes temperature=0 to Bedrock."
+    )
 
 --- tests/unit/test_pipeline_run_metadata.py ---
 # tests/unit/test_pipeline_run_metadata.py
@@ -1621,6 +1852,55 @@ def test_each_content_item_receives_relevance_score_between_0_and_100(
             f"relevance_score {score} out of [0,100] range for {item['id']}"
         )
 
+--- tests/unit/test_source_config_new_entry.py ---
+# tests/unit/test_source_config_new_entry.py
+import textwrap
+
+import pytest
+
+from src.ingestion.config import load_sources
+
+
+def test_new_source_entry_in_config_file_is_included_in_loaded_sources(tmp_path):
+    """
+    Given a sources.yaml with an existing source and a newly added source entry
+    (name, type, URL, and optional category), when load_sources() is called,
+    the new source is present in the returned list — confirming it would be
+    included in the next daily pipeline run.
+    """
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-existing-001
+            name: Existing AI News
+            type: rss
+            url: https://existing.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-new-002
+            name: New Source Added by User
+            type: web
+            url: https://new-source.example.com/articles
+            category: research
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+
+    sources = load_sources(str(config_file))
+
+    source_ids = [s.id for s in sources]
+    assert "src-new-002" in source_ids, (
+        "Newly added source 'src-new-002' was not returned by load_sources()"
+    )
+
+    new_source = next(s for s in sources if s.id == "src-new-002")
+    assert new_source.name == "New Source Added by User"
+    assert new_source.type == "web"
+    assert new_source.url == "https://new-source.example.com/articles"
+    assert new_source.category == "research"
+
 --- tests/unit/test_youtube_transcription_failure.py ---
 # tests/unit/test_youtube_transcription_failure.py
 import json
@@ -2205,6 +2485,12 @@ The constitution contains only template placeholders with no specific principles
 - **Category**: GREEN-FAILURE
 - **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
 - **Added after**: B009 at 2026-03-25T02:58:00Z
+
+
+### Sign: B024 behavior A already implemented — RED phase produces GREEN test
+- **Category**: RED-FAILURE
+- **Detail**: The source-removal behavior (B024 Behavior A) is already covered by the existing `handler.py` implementation: `load_sources()` reads only from the active `SOURCES_CONFIG` file, so any source absent from YAML is never attempted. The corrected single-assertion RED test (`sources_attempted == 1`, no S3 keys under `src-removed-002/`, at least one key under `src-remaining-001/`) passes immediately without new implementation. When a behavior is already implemented by prior GREEN phases, the RED test will be green from the start — treat this as "behavior pre-implemented" and advance directly to VALIDATE.
+- **Added after**: B024 at 2026-03-25T04:22:49Z
 
 ## Output Format
 

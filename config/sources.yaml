@@ -1,0 +1,186 @@
+# config/sources.yaml
+# Seed source list for the AI Researcher daily intelligence briefing pipeline.
+# Covers all supported format types: rss, web, x, youtube, podcast, substack.
+
+sources:
+  # --- RSS ---
+  - id: hacker-news-rss
+    name: Hacker News
+    type: rss
+    url: https://news.ycombinator.com/rss
+    category: engineering
+    active: true
+    priority: 1
+
+  - id: the-pragmatic-engineer-rss
+    name: The Pragmatic Engineer
+    type: rss
+    url: https://newsletter.pragmaticengineer.com/feed
+    category: engineering
+    active: true
+    priority: 2
+
+  - id: openai-blog-rss
+    name: OpenAI Blog
+    type: rss
+    url: https://openai.com/blog/rss.xml
+    category: ai
+    active: true
+    priority: 1
+
+  - id: anthropic-news-rss
+    name: Anthropic News
+    type: rss
+    url: https://www.anthropic.com/news/rss.xml
+    category: ai
+    active: true
+    priority: 1
+
+  - id: mit-news-ai-rss
+    name: MIT News - AI
+    type: rss
+    url: https://news.mit.edu/rss/topic/artificial-intelligence2
+    category: ai
+    active: true
+    priority: 3
+
+  # --- WEB ---
+  - id: thoughtworks-insights
+    name: ThoughtWorks Insights
+    type: web
+    url: https://www.thoughtworks.com/insights/blog
+    category: engineering
+    active: true
+    priority: 2
+
+  - id: martin-fowler-blog
+    name: Martin Fowler's Blog
+    type: web
+    url: https://martinfowler.com/
+    category: engineering
+    active: true
+    priority: 2
+
+  - id: acm-queue
+    name: ACM Queue
+    type: web
+    url: https://queue.acm.org/
+    category: engineering
+    active: true
+    priority: 3
+
+  - id: dzone-agile
+    name: DZone Agile
+    type: web
+    url: https://dzone.com/agile-methodology-training-tools-news
+    category: agile
+    active: true
+    priority: 3
+
+  # --- X (Twitter) ---
+  - id: x-simonw
+    name: Simon Willison
+    type: x
+    url: https://twitter.com/simonw
+    category: ai
+    active: true
+    priority: 2
+
+  - id: x-karpathy
+    name: Andrej Karpathy
+    type: x
+    url: https://twitter.com/karpathy
+    category: ai
+    active: true
+    priority: 1
+
+  - id: x-swyx
+    name: swyx
+    type: x
+    url: https://twitter.com/swyx
+    category: engineering
+    active: true
+    priority: 2
+
+  # --- YOUTUBE ---
+  - id: yt-fireship
+    name: Fireship
+    type: youtube
+    url: https://www.youtube.com/c/Fireship
+    category: engineering
+    active: true
+    priority: 2
+
+  - id: yt-two-minute-papers
+    name: Two Minute Papers
+    type: youtube
+    url: https://www.youtube.com/@TwoMinutePapers
+    category: ai
+    active: true
+    priority: 3
+
+  - id: yt-google-deepmind
+    name: Google DeepMind
+    type: youtube
+    url: https://www.youtube.com/c/GoogleDeepMind
+    category: ai
+    active: true
+    priority: 2
+
+  # --- PODCAST ---
+  - id: podcast-software-engineering-daily
+    name: Software Engineering Daily
+    type: podcast
+    url: https://softwareengineeringdaily.com/feed/podcast/
+    category: engineering
+    active: true
+    priority: 2
+
+  - id: podcast-lex-fridman
+    name: Lex Fridman Podcast
+    type: podcast
+    url: https://lexfridman.com/feed/podcast/
+    category: ai
+    active: true
+    priority: 3
+
+  - id: podcast-latent-space
+    name: Latent Space
+    type: podcast
+    url: https://www.latent.space/feed/podcast
+    category: ai
+    active: true
+    priority: 2
+
+  # --- SUBSTACK ---
+  - id: substack-ai-supremacy
+    name: AI Supremacy
+    type: substack
+    url: https://aisupremacy.substack.com/feed
+    category: ai
+    active: true
+    priority: 2
+
+  - id: substack-byte-sized-ai
+    name: Byte-Sized AI
+    type: substack
+    url: https://bytesizedai.substack.com/feed
+    category: ai
+    active: true
+    priority: 3
+
+  - id: substack-lenny
+    name: Lenny's Newsletter
+    type: substack
+    url: https://www.lennysnewsletter.com/feed
+    category: product
+    active: true
+    priority: 2
+
+  - id: substack-software-design
+    name: "Software Design: Tidy First?"
+    type: substack
+    url: https://tidyfirst.substack.com/feed
+    category: engineering
+    active: true
+    priority: 2

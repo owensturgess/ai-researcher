@@ -41,93 +41,54 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_source_removal_stops_ingestion.py
-# tests/unit/test_source_removal_stops_ingestion.py
+# tests/unit/test_seed_source_list.py
+# tests/unit/test_seed_source_list.py
 #
-# Behavior B024: Given a source is removed from the configuration file,
-# content from that source is no longer ingested on the next run.
+# Behavior B025: The seed source list contains at least 20 sources spanning
+# all supported format types (rss, web, x, youtube, podcast, substack).
 #
-# This test verifies that the pipeline run record written to S3 contains an
-# explicit list of source IDs that were attempted (source_ids_attempted), and
-# that the removed source's ID is absent from that list while the remaining
-# source's ID is present.  The handler currently writes only counts
-# (sources_attempted, sources_succeeded) — not an ID list — so this test fails
-# until source_ids_attempted is added to the run record.
-import json
-import textwrap
-from unittest.mock import patch, MagicMock
+# Tests the actual config/sources.yaml at the repository root — no mocking,
+# because the observable behavior IS the contents of the seed file itself.
+import os
+import pathlib
 
-import boto3
-from moto import mock_aws
+import pytest
 
-from src.ingestion.handler import handler
+from src.ingestion.config import load_sources
+
+# Canonical path for the seed source list, relative to the repository root
+_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
+_SEED_CONFIG = _REPO_ROOT / "config" / "sources.yaml"
+
+REQUIRED_TYPES = {"rss", "web", "x", "youtube", "podcast", "substack"}
+MIN_SOURCE_COUNT = 20
 
 
-@mock_aws
-def test_removed_source_id_is_absent_from_run_record_source_id_list(
-    monkeypatch, tmp_path
-):
+def test_seed_source_list_has_at_least_20_sources_spanning_all_format_types():
     """
-    Given a config file that contains only src-remaining-001 (src-removed-002
-    was previously active but has been removed from the YAML), when the
-    ingestion handler runs, the pipeline run record written to S3 includes a
-    source_ids_attempted list that contains src-remaining-001 and does NOT
-    contain src-removed-002 — giving operators an explicit record of which
-    sources participated in each run.
+    Given the seed sources.yaml at config/sources.yaml, when load_sources() is
+    called on it, the result contains at least 20 active sources and all
+    supported format types (rss, web, x, youtube, podcast, substack) are
+    represented by at least one source each.
     """
-    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
-    monkeypatch.setenv(
-        "TRANSCRIPTION_QUEUE_URL",
-        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
-    )
-    monkeypatch.setenv("RUN_DATE", "2026-03-24")
-
-    # Config after removal: only src-remaining-001 is present
-    sources_yaml = textwrap.dedent("""\
-        sources:
-          - id: src-remaining-001
-            name: Remaining AI Feed
-            type: rss
-            url: https://remaining.example.com/feed.xml
-            category: ai
-            active: true
-            priority: 1
-    """)
-    config_file = tmp_path / "sources.yaml"
-    config_file.write_text(sources_yaml)
-    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
-
-    s3 = boto3.client("s3", region_name="us-east-1")
-    s3.create_bucket(Bucket="test-pipeline-bucket")
-    sqs = boto3.client("sqs", region_name="us-east-1")
-    sqs.create_queue(QueueName="test-transcription-queue")
-
-    fake_feed = MagicMock()
-    fake_feed.bozo = False
-    fake_feed.entries = []
-
-    with patch("feedparser.parse", return_value=fake_feed):
-        handler({}, None)
-
-    # Read the pipeline run record written to S3
-    response = s3.get_object(
-        Bucket="test-pipeline-bucket",
-        Key="pipeline-runs/2026-03-24/run.json",
-    )
-    run_data = json.loads(response["Body"].read())
-
-    # The run record must include an explicit list of source IDs attempted
-    assert "source_ids_attempted" in run_data, (
-        "pipeline run record missing 'source_ids_attempted' field — "
-        "operators cannot verify which sources ran vs. which were removed"
+    assert _SEED_CONFIG.exists(), (
+        f"Seed source config not found at {_SEED_CONFIG}. "
+        "Create config/sources.yaml with at least 20 sources covering all format types."
     )
 
-    source_ids = run_data["source_ids_attempted"]
-    assert "src-remaining-001" in source_ids, (
-        f"src-remaining-001 should be in source_ids_attempted but got: {source_ids}"
+    sources = load_sources(str(_SEED_CONFIG))
+
+    assert len(sources) >= MIN_SOURCE_COUNT, (
+        f"Seed source list has only {len(sources)} active sources; "
+        f"need at least {MIN_SOURCE_COUNT}."
     )
-    assert "src-removed-002" not in source_ids, (
-        f"src-removed-002 must not appear in source_ids_attempted after removal, got: {source_ids}"
+
+    present_types = {s.type for s in sources}
+    missing_types = REQUIRED_TYPES - present_types
+    assert not missing_types, (
+        f"Seed source list is missing format types: {missing_types}. "
+        f"Present types: {present_types}. "
+        "Add at least one source of each type to config/sources.yaml."
     )
 
 ## Public Interfaces (from interfaces.md)

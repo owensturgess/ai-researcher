@@ -40,19 +40,11 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected — `source_ids_attempted` is absent from the current run record.
+Test fails as expected — `config/sources.yaml` does not exist.
 
 ```
-FILE: tests/unit/test_source_removal_stops_ingestion.py
+FILE: tests/unit/test_seed_source_list.py
 ```
-
-The test fails with:
-```
-AssertionError: pipeline run record missing 'source_ids_attempted' field
-assert 'source_ids_attempted' in {'delivery_status': 'pending', 'items_ingested': 0, 'sources_attempted': 1, ...}
-```
-
-The handler currently writes only count fields (`sources_attempted`, `sources_succeeded`, etc.) — no explicit list of source IDs. The test requires adding `source_ids_attempted` to the S3 pipeline run record, which gives operators a verifiable record of exactly which sources participated in each run (and implicitly proves removed sources are excluded by ID, not just by count).
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -88,8 +80,8 @@ import logging
 import os
 
 import boto3
-import yaml
 
+from src.ingestion.config import load_sources as _load_sources
 from src.ingestion.sources import rss, web, x_api
 
 logger = logging.getLogger(__name__)
@@ -99,10 +91,7 @@ _INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    sources = [s for s in config.get("sources", []) if s.get("active", True)]
-    return sorted(sources, key=lambda s: s.get("priority", 1))
+    return sorted(_load_sources(config_path), key=lambda s: s.priority)
 
 
 def handler(event, context):
@@ -116,14 +105,13 @@ def handler(event, context):
     all_items = []
 
     for source in sources:
-        source_type = source.get("type")
-        ingest_fn = _INGESTERS.get(source_type)
+        ingest_fn = _INGESTERS.get(source.type)
         if ingest_fn is None:
             continue
         try:
             items = ingest_fn(source, since=None)
             for i, item in enumerate(items):
-                item_key = f"raw/{run_date}/{source['id']}/{i}.json"
+                item_key = f"raw/{run_date}/{source.id}/{i}.json"
                 s3.put_object(
                     Bucket=bucket,
                     Key=item_key,
@@ -133,11 +121,12 @@ def handler(event, context):
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:
-            logger.warning("ingestion failed for source %s", source.get("id", "unknown"), exc_info=True)
+            logger.warning("ingestion failed for source %s", source.id, exc_info=True)
 
     run_record = {
         "sources_attempted": sources_attempted,
         "sources_succeeded": sources_succeeded,
+        "source_ids_attempted": [s.id for s in sources],
         "items_ingested": len(all_items),
         "transcription_jobs": 0,
         "delivery_status": "pending",
@@ -158,7 +147,7 @@ import feedparser
 
 
 def ingest(source, since):
-    feed = feedparser.parse(source["url"])
+    feed = feedparser.parse(source.url)
     if feed.bozo:
         return []
     return [
@@ -166,7 +155,7 @@ def ingest(source, since):
             "title": getattr(entry, "title", ""),
             "url": getattr(entry, "link", ""),
             "summary": getattr(entry, "summary", ""),
-            "source_id": source["id"],
+            "source_id": source.id,
         }
         for entry in feed.entries
     ]
@@ -178,7 +167,7 @@ from bs4 import BeautifulSoup
 
 
 def ingest(source, since):
-    with urllib.request.urlopen(source["url"]) as response:
+    with urllib.request.urlopen(source.url) as response:
         html = response.read()
     soup = BeautifulSoup(html, "html.parser")
     items = []
@@ -189,9 +178,9 @@ def ingest(source, since):
         summary = p_tag.get_text(strip=True) if p_tag else ""
         items.append({
             "title": title,
-            "url": source["url"],
+            "url": source.url,
             "summary": summary,
-            "source_id": source["id"],
+            "source_id": source.id,
         })
     return items
 

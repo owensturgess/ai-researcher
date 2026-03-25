@@ -117,7 +117,7 @@
 
 - [ ] T038 [US4] Implement source configuration validation in src/ingestion/config.py — validate sources.yaml schema (required fields: id, name, type, url; optional: category, active, priority), reject duplicates by id, warn on unknown source types, log validation results
 - [ ] T039 [US4] Implement hot-reload of context prompt in src/scoring/handler.py — read config/context-prompt.txt at the start of each pipeline run (not cached across runs), allowing CTO to update scoring criteria without code changes (FR-019)
-- [ ] T040 [US4] Create seed source list in config/sources.yaml — populate with 20+ high-quality sources: 5+ RSS/blog feeds (Simon Willison, The Pragmatic Engineer, etc.), 3+ Substack feeds, 3+ X accounts (AI/SDLC thought leaders), 3+ YouTube channels (AI engineering talks), 3+ podcast feeds (Latent Space, Practical AI, etc.), 3+ web sources; include category tags and priority rankings
+- [x] T040 [US4] Create seed source list in config/sources.yaml — populate with 20+ high-quality sources: 5+ RSS/blog feeds (Simon Willison, The Pragmatic Engineer, etc.), 3+ Substack feeds, 3+ X accounts (AI/SDLC thought leaders), 3+ YouTube channels (AI engineering talks), 3+ podcast feeds (Latent Space, Practical AI, etc.), 3+ web sources; include category tags and priority rankings
 
 **Checkpoint**: Source management is fully configuration-driven. Adding a source is a YAML edit.
 
