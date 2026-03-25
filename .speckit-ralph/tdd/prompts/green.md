@@ -40,10 +40,10 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected — the handler returns `{'status': 'ok'}` with no `alert_sent` key.
+Test fails as expected (RED). The handler publishes no metrics at all into the `AgenticSDLCIntel` namespace currently — it doesn't aggregate 7-day rolling delivery reliability or average cost per run.
 
 ```
-FILE: tests/unit/test_cost_alert_notification.py
+FILE: tests/unit/test_delivery_reliability_metrics.py
 ```
 
 ## Existing Code (for context — extend or modify as needed)
@@ -727,6 +727,7 @@ def handler(event: dict, context: object) -> dict:
     )
 
     threshold = float(os.environ.get("COST_ALERT_THRESHOLD_USD", "10.00"))
+    alert_sent = False
     if estimated_cost_usd > threshold:
         ses = boto3.client("ses")
         ses.send_email(
@@ -737,8 +738,9 @@ def handler(event: dict, context: object) -> dict:
                 "Body": {"Text": {"Data": f"Estimated cost ${estimated_cost_usd:.2f} exceeds threshold ${threshold:.2f}"}},
             },
         )
+        alert_sent = True
 
-    return {"status": "ok"}
+    return {"status": "ok", "alert_sent": alert_sent}
 
 ## Plan Context (language, framework, project structure)
 

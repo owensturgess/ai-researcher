@@ -2,10 +2,25 @@
 import json
 import logging
 import os
+from datetime import date, timedelta
 
 import boto3
 
 logger = logging.getLogger(__name__)
+
+
+def _load_rolling_runs(s3, bucket, run_date_str, days=7):
+    """Load up to `days` pipeline run records ending on run_date_str (inclusive)."""
+    end = date.fromisoformat(run_date_str)
+    runs = []
+    for i in range(days):
+        d = (end - timedelta(days=days - 1 - i)).isoformat()
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=f"pipeline-runs/{d}/run.json")
+            runs.append(json.loads(obj["Body"].read()))
+        except Exception:
+            pass
+    return runs
 
 
 def handler(event: dict, context: object) -> dict:
@@ -43,6 +58,19 @@ def handler(event: dict, context: object) -> dict:
             {"MetricName": "EstimatedCostUSD", "Value": estimated_cost_usd, "Unit": "None"},
         ],
     )
+
+    rolling_runs = _load_rolling_runs(s3, bucket, run_date)
+    if rolling_runs:
+        delivered = sum(1 for r in rolling_runs if r.get("delivery_status") == "delivered")
+        reliability_pct = delivered / len(rolling_runs) * 100
+        avg_cost = sum(r.get("estimated_cost_usd", 0.0) for r in rolling_runs) / len(rolling_runs)
+        cloudwatch.put_metric_data(
+            Namespace="AgenticSDLCIntel",
+            MetricData=[
+                {"MetricName": "DeliveryReliabilityPct", "Value": reliability_pct, "Unit": "Percent"},
+                {"MetricName": "AverageCostPerRun", "Value": avg_cost, "Unit": "None"},
+            ],
+        )
 
     threshold = float(os.environ.get("COST_ALERT_THRESHOLD_USD", "10.00"))
     alert_sent = False
