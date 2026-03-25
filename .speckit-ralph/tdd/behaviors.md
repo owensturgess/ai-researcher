@@ -43,7 +43,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
-| B023 | Given a source configuration file, when a user adds a new source entry with name, type, URL, and optional category, the new source is included in the next daily pipeline run | US4.S1 | T013, T038 | queued |
+| B023 | Given a source configuration file, when a user adds a new source entry with name, type, URL, and optional category, the new source is included in the next daily pipeline run | US4.S1 | T013, T038 | complete |
 | B024 | Given a source is removed from the configuration file, content from that source is no longer ingested on the next run | US4.S2 | T013, T038 | queued |
 | B025 | The seed source list contains at least 20 sources spanning all supported format types (RSS/web, X, YouTube, podcasts, Substack) | US4.S3 | T040 | queued |
 | B026 | The relevance scoring context prompt can be updated without code changes, taking effect on the next pipeline run | FR-019 | T039 | queued |

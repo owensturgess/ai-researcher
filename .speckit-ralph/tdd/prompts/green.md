@@ -40,13 +40,11 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails correctly. The assertion shows scores differ by 45 points (30 vs 75) because the handler doesn't pass `temperature=0` to Bedrock.
-
 ```
-FILE: tests/unit/test_scoring_reliability.py
+FILE: tests/unit/test_source_config_new_entry.py
 ```
 
-The test fails with `AssertionError: Scores differ by 45 points (day1=30, day2=75)`. The mock simulates LLM non-determinism — returning alternating scores (30, 75) when `temperature` is absent, but a stable 75 on both calls when `temperature=0` is set. The current handler (`src/scoring/handler.py:15`) builds the Bedrock request body without a `temperature` field, so the mock's non-deterministic path triggers and the ±10 reliability assertion fails.
+The test calls `load_sources(config_path)` from `src/ingestion/config.py` (which doesn't exist yet) with a YAML file containing a newly added source entry, then asserts the new source appears in the returned list with the correct `name`, `type`, `url`, and `category`. It will fail immediately with `ModuleNotFoundError` until the implementation is written.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -513,6 +511,7 @@ def _score_item(bedrock, context_prompt, item):
     request_body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 256,
+        "temperature": 0,
         "system": context_prompt,
         "messages": [{"role": "user", "content": user_text}],
     })
