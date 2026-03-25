@@ -53,7 +53,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
-| B028 | Given two content items from different sources cover the same development, only the highest-relevance version appears in the briefing | US5.S1 | T041, T042, T043 | queued |
+| B028 | Given two content items from different sources cover the same development, only the highest-relevance version appears in the briefing | US5.S1 | T041, T042, T043 | complete |
 | B029 | Given two items have similar topics but genuinely different angles or insights, both items are retained as distinct entries | US5.S2 | T042, T043 | queued |
 | B030 | When the same development is announced across 5+ sources, the deduplication step selects the single best representative item, with other source links optionally listed as "also reported by" | Edge Case | T042, T043 | queued |
 

@@ -37,6 +37,12 @@ from src.shared.models import Source
 def load_sources(config_path):
     with open(config_path) as f:
         config = yaml.safe_load(f)
+    raw = config.get("sources", [])
+    seen = set()
+    for s in raw:
+        if s["id"] in seen:
+            raise ValueError(f"duplicate source id: {s['id']}")
+        seen.add(s["id"])
     return [
         Source(
             id=s["id"],
@@ -58,8 +64,8 @@ import logging
 import os
 
 import boto3
-import yaml
 
+from src.ingestion.config import load_sources as _load_sources
 from src.ingestion.sources import rss, web, x_api
 
 logger = logging.getLogger(__name__)
@@ -69,10 +75,7 @@ _INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    sources = [s for s in config.get("sources", []) if s.get("active", True)]
-    return sorted(sources, key=lambda s: s.get("priority", 1))
+    return sorted(_load_sources(config_path), key=lambda s: s.priority)
 
 
 def handler(event, context):
@@ -86,14 +89,13 @@ def handler(event, context):
     all_items = []
 
     for source in sources:
-        source_type = source.get("type")
-        ingest_fn = _INGESTERS.get(source_type)
+        ingest_fn = _INGESTERS.get(source.type)
         if ingest_fn is None:
             continue
         try:
             items = ingest_fn(source, since=None)
             for i, item in enumerate(items):
-                item_key = f"raw/{run_date}/{source['id']}/{i}.json"
+                item_key = f"raw/{run_date}/{source.id}/{i}.json"
                 s3.put_object(
                     Bucket=bucket,
                     Key=item_key,
@@ -103,12 +105,12 @@ def handler(event, context):
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:
-            logger.warning("ingestion failed for source %s", source.get("id", "unknown"), exc_info=True)
+            logger.warning("ingestion failed for source %s", source.id, exc_info=True)
 
     run_record = {
         "sources_attempted": sources_attempted,
         "sources_succeeded": sources_succeeded,
-        "source_ids_attempted": [s.get("id") for s in sources],
+        "source_ids_attempted": [s.id for s in sources],
         "items_ingested": len(all_items),
         "transcription_jobs": 0,
         "delivery_status": "pending",
@@ -129,7 +131,7 @@ import feedparser
 
 
 def ingest(source, since):
-    feed = feedparser.parse(source["url"])
+    feed = feedparser.parse(source.url)
     if feed.bozo:
         return []
     return [
@@ -137,7 +139,7 @@ def ingest(source, since):
             "title": getattr(entry, "title", ""),
             "url": getattr(entry, "link", ""),
             "summary": getattr(entry, "summary", ""),
-            "source_id": source["id"],
+            "source_id": source.id,
         }
         for entry in feed.entries
     ]
@@ -149,7 +151,7 @@ from bs4 import BeautifulSoup
 
 
 def ingest(source, since):
-    with urllib.request.urlopen(source["url"]) as response:
+    with urllib.request.urlopen(source.url) as response:
         html = response.read()
     soup = BeautifulSoup(html, "html.parser")
     items = []
@@ -160,9 +162,9 @@ def ingest(source, since):
         summary = p_tag.get_text(strip=True) if p_tag else ""
         items.append({
             "title": title,
-            "url": source["url"],
+            "url": source.url,
             "summary": summary,
-            "source_id": source["id"],
+            "source_id": source.id,
         })
     return items
 
@@ -437,6 +439,24 @@ def handler(event: dict, context: object) -> dict:
     if any_failed:
         return {"transcript_status": "failed"}
     return {"transcript_status": "completed"}
+
+--- src/shared/config.py ---
+# src/shared/config.py
+import os
+
+
+def load_context_prompt(config_dir: str) -> str:
+    path = os.path.join(config_dir, "context-prompt.txt")
+    with open(path) as f:
+        return f.read()
+
+
+def load_settings(config_dir: str):
+    raise NotImplementedError("load_settings not yet implemented")
+
+
+def load_sources(config_dir: str):
+    raise NotImplementedError("load_sources not yet implemented")
 
 --- src/shared/models.py ---
 # src/shared/models.py
@@ -1589,6 +1609,53 @@ def test_sources_ingested_in_priority_order_regardless_of_yaml_declaration_order
         f"Expected priority=3 source last, got: {call_order}"
     )
 
+--- tests/unit/test_context_prompt_hot_reload.py ---
+# tests/unit/test_context_prompt_hot_reload.py
+#
+# Behavior B026: The relevance scoring context prompt can be updated without
+# code changes, taking effect on the next pipeline run.
+#
+# Tests the public interface load_context_prompt(config_dir) in
+# src/shared/config.py. Each call must read the file fresh from disk so that
+# an operator can edit context-prompt.txt and the change takes effect on the
+# next pipeline run without redeploying code.
+from src.shared.config import load_context_prompt
+
+
+def test_updated_context_prompt_file_is_returned_on_next_call_without_code_changes(
+    tmp_path,
+):
+    """
+    Given config/context-prompt.txt is updated on disk between two calls to
+    load_context_prompt(), when the second call is made (no code changes), it
+    returns the new prompt text — confirming the function reads the file fresh
+    each time rather than caching the result.
+    """
+    config_dir = str(tmp_path)
+    prompt_file = tmp_path / "context-prompt.txt"
+
+    # Write initial prompt and read it
+    prompt_file.write_text("PROMPT_VERSION_ONE: Focus on agentic SDLC tooling.")
+    first_result = load_context_prompt(config_dir)
+
+    assert "PROMPT_VERSION_ONE" in first_result, (
+        f"load_context_prompt did not return the initial prompt text; got: {first_result!r}"
+    )
+
+    # Update the prompt on disk — no code changes, no restart
+    prompt_file.write_text("PROMPT_VERSION_TWO: Focus on autonomous agent orchestration.")
+    second_result = load_context_prompt(config_dir)
+
+    # The second call must reflect the updated file content
+    assert "PROMPT_VERSION_TWO" in second_result, (
+        "load_context_prompt returned stale content after the file was updated — "
+        "it appears to be caching the prompt rather than reading from disk each call. "
+        f"Got: {second_result!r}"
+    )
+    assert "PROMPT_VERSION_ONE" not in second_result, (
+        "load_context_prompt still returned old prompt text after the file was updated."
+    )
+
 --- tests/unit/test_youtube_ingestion.py ---
 # tests/unit/test_youtube_ingestion.py
 from datetime import datetime, timezone
@@ -1729,6 +1796,51 @@ def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(c
     # A rate-limit-specific warning must be logged
     rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
     assert len(rate_limit_logs) >= 1
+
+--- tests/unit/test_source_config_validation.py ---
+# tests/unit/test_source_config_validation.py
+#
+# Behavior B027: Source configuration is validated — duplicate IDs rejected.
+#
+# Tests the public interface load_sources(config_path) in src/ingestion/config.py.
+# When two source entries share the same ID, load_sources() must raise a
+# ValueError so that misconfigured configs are caught before ingestion runs.
+import textwrap
+
+import pytest
+
+from src.ingestion.config import load_sources
+
+
+def test_load_sources_raises_when_config_contains_duplicate_source_ids(tmp_path):
+    """
+    Given a sources.yaml that contains two entries with the same id,
+    when load_sources() is called, it raises a ValueError — preventing
+    ambiguous pipeline runs where the same source ID would write to the
+    same S3 paths and produce non-deterministic results.
+    """
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-duplicate-id
+            name: First Source
+            type: rss
+            url: https://first.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-duplicate-id
+            name: Second Source With Same ID
+            type: web
+            url: https://second.example.com/articles
+            category: research
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        load_sources(str(config_file))
 
 --- tests/unit/test_scoring_relevance.py ---
 # tests/unit/test_scoring_relevance.py
@@ -2086,6 +2198,56 @@ def test_scored_item_above_threshold_is_classified_with_valid_urgency_level(
     )
     assert scored["urgency"] == "action_needed", (
         f"Expected 'action_needed' from LLM response, got '{scored['urgency']}'"
+    )
+
+--- tests/unit/test_seed_source_list.py ---
+# tests/unit/test_seed_source_list.py
+#
+# Behavior B025: The seed source list contains at least 20 sources spanning
+# all supported format types (rss, web, x, youtube, podcast, substack).
+#
+# Tests the actual config/sources.yaml at the repository root — no mocking,
+# because the observable behavior IS the contents of the seed file itself.
+import os
+import pathlib
+
+import pytest
+
+from src.ingestion.config import load_sources
+
+# Canonical path for the seed source list, relative to the repository root
+_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
+_SEED_CONFIG = _REPO_ROOT / "config" / "sources.yaml"
+
+REQUIRED_TYPES = {"rss", "web", "x", "youtube", "podcast", "substack"}
+MIN_SOURCE_COUNT = 20
+
+
+def test_seed_source_list_has_at_least_20_sources_spanning_all_format_types():
+    """
+    Given the seed sources.yaml at config/sources.yaml, when load_sources() is
+    called on it, the result contains at least 20 active sources and all
+    supported format types (rss, web, x, youtube, podcast, substack) are
+    represented by at least one source each.
+    """
+    assert _SEED_CONFIG.exists(), (
+        f"Seed source config not found at {_SEED_CONFIG}. "
+        "Create config/sources.yaml with at least 20 sources covering all format types."
+    )
+
+    sources = load_sources(str(_SEED_CONFIG))
+
+    assert len(sources) >= MIN_SOURCE_COUNT, (
+        f"Seed source list has only {len(sources)} active sources; "
+        f"need at least {MIN_SOURCE_COUNT}."
+    )
+
+    present_types = {s.type for s in sources}
+    missing_types = REQUIRED_TYPES - present_types
+    assert not missing_types, (
+        f"Seed source list is missing format types: {missing_types}. "
+        f"Present types: {present_types}. "
+        "Add at least one source of each type to config/sources.yaml."
     )
 
 --- tests/unit/test_podcast_transcription.py ---

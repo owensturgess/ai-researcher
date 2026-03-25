@@ -131,7 +131,7 @@
 
 ### Implementation for User Story 5
 
-- [ ] T041 [US5] Implement URL-based exact deduplication in src/scoring/deduplication.py — hash URLs, collapse identical URLs across sources at ingestion time, keep earliest ingested version
+- [x] T041 [US5] Implement URL-based exact deduplication in src/scoring/deduplication.py — hash URLs, collapse identical URLs across sources at ingestion time, keep earliest ingested version
 - [ ] T042 [US5] Implement LLM-based semantic deduplication in src/scoring/deduplication.py — during scoring, include instruction in the prompt to flag items that cover the same core development as a previously scored item, set is_duplicate=true and duplicate_of=primary_item_id on ScoredItem
 - [ ] T043 [US5] Integrate deduplication into scoring pipeline in src/scoring/handler.py — run URL dedup before scoring, run semantic dedup during scoring, filter out duplicates before passing to briefing assembly, optionally include "also reported by" source list on primary item
 

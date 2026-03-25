@@ -40,11 +40,13 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected — `load_sources` silently accepts duplicate IDs today.
+Test fails at import — `src.scoring.deduplication` doesn't exist. This is the correct RED state (no implementation yet, `ScoredItem` also missing from models).
 
 ```
-FILE: tests/unit/test_source_config_validation.py
+FILE: tests/unit/test_semantic_deduplication.py
 ```
+
+The test fails with `ModuleNotFoundError: No module named 'src.scoring.deduplication'` — confirming RED phase. It also implicitly requires `ScoredItem` in `src/shared/models.py`, which doesn't exist yet.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -59,6 +61,12 @@ from src.shared.models import Source
 def load_sources(config_path):
     with open(config_path) as f:
         config = yaml.safe_load(f)
+    raw = config.get("sources", [])
+    seen = set()
+    for s in raw:
+        if s["id"] in seen:
+            raise ValueError(f"duplicate source id: {s['id']}")
+        seen.add(s["id"])
     return [
         Source(
             id=s["id"],
@@ -69,7 +77,7 @@ def load_sources(config_path):
             active=s.get("active", True),
             priority=s.get("priority", 1),
         )
-        for s in config.get("sources", [])
+        for s in raw
         if s.get("active", True)
     ]
 

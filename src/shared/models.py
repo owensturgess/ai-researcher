@@ -26,3 +26,15 @@ class ContentItem:
     original_url: str
     content_format: str = "text"  # text / audio / video
     transcript_status: str = "not_needed"  # pending / completed / failed / not_needed
+
+
+@dataclass
+class ScoredItem:
+    content_item_id: str
+    relevance_score: int
+    urgency: str
+    relevance_tag: str
+    executive_summary: str
+    scoring_reasoning: str
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None

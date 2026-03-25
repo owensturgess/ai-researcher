@@ -23,6 +23,6 @@ def load_sources(config_path):
             active=s.get("active", True),
             priority=s.get("priority", 1),
         )
-        for s in config.get("sources", [])
+        for s in raw
         if s.get("active", True)
     ]
