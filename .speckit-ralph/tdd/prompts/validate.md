@@ -41,54 +41,51 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_seed_source_list.py
-# tests/unit/test_seed_source_list.py
+# tests/unit/test_context_prompt_hot_reload.py
+# tests/unit/test_context_prompt_hot_reload.py
 #
-# Behavior B025: The seed source list contains at least 20 sources spanning
-# all supported format types (rss, web, x, youtube, podcast, substack).
+# Behavior B026: The relevance scoring context prompt can be updated without
+# code changes, taking effect on the next pipeline run.
 #
-# Tests the actual config/sources.yaml at the repository root — no mocking,
-# because the observable behavior IS the contents of the seed file itself.
-import os
-import pathlib
-
-import pytest
-
-from src.ingestion.config import load_sources
-
-# Canonical path for the seed source list, relative to the repository root
-_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
-_SEED_CONFIG = _REPO_ROOT / "config" / "sources.yaml"
-
-REQUIRED_TYPES = {"rss", "web", "x", "youtube", "podcast", "substack"}
-MIN_SOURCE_COUNT = 20
+# Tests the public interface load_context_prompt(config_dir) in
+# src/shared/config.py. Each call must read the file fresh from disk so that
+# an operator can edit context-prompt.txt and the change takes effect on the
+# next pipeline run without redeploying code.
+from src.shared.config import load_context_prompt
 
 
-def test_seed_source_list_has_at_least_20_sources_spanning_all_format_types():
+def test_updated_context_prompt_file_is_returned_on_next_call_without_code_changes(
+    tmp_path,
+):
     """
-    Given the seed sources.yaml at config/sources.yaml, when load_sources() is
-    called on it, the result contains at least 20 active sources and all
-    supported format types (rss, web, x, youtube, podcast, substack) are
-    represented by at least one source each.
+    Given config/context-prompt.txt is updated on disk between two calls to
+    load_context_prompt(), when the second call is made (no code changes), it
+    returns the new prompt text — confirming the function reads the file fresh
+    each time rather than caching the result.
     """
-    assert _SEED_CONFIG.exists(), (
-        f"Seed source config not found at {_SEED_CONFIG}. "
-        "Create config/sources.yaml with at least 20 sources covering all format types."
+    config_dir = str(tmp_path)
+    prompt_file = tmp_path / "context-prompt.txt"
+
+    # Write initial prompt and read it
+    prompt_file.write_text("PROMPT_VERSION_ONE: Focus on agentic SDLC tooling.")
+    first_result = load_context_prompt(config_dir)
+
+    assert "PROMPT_VERSION_ONE" in first_result, (
+        f"load_context_prompt did not return the initial prompt text; got: {first_result!r}"
     )
 
-    sources = load_sources(str(_SEED_CONFIG))
+    # Update the prompt on disk — no code changes, no restart
+    prompt_file.write_text("PROMPT_VERSION_TWO: Focus on autonomous agent orchestration.")
+    second_result = load_context_prompt(config_dir)
 
-    assert len(sources) >= MIN_SOURCE_COUNT, (
-        f"Seed source list has only {len(sources)} active sources; "
-        f"need at least {MIN_SOURCE_COUNT}."
+    # The second call must reflect the updated file content
+    assert "PROMPT_VERSION_TWO" in second_result, (
+        "load_context_prompt returned stale content after the file was updated — "
+        "it appears to be caching the prompt rather than reading from disk each call. "
+        f"Got: {second_result!r}"
     )
-
-    present_types = {s.type for s in sources}
-    missing_types = REQUIRED_TYPES - present_types
-    assert not missing_types, (
-        f"Seed source list is missing format types: {missing_types}. "
-        f"Present types: {present_types}. "
-        "Add at least one source of each type to config/sources.yaml."
+    assert "PROMPT_VERSION_ONE" not in second_result, (
+        "load_context_prompt still returned old prompt text after the file was updated."
     )
 
 ## Public Interfaces (from interfaces.md)

@@ -40,11 +40,13 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected — `config/sources.yaml` does not exist.
+The test fails correctly at runtime (not import time). 
 
 ```
-FILE: tests/unit/test_seed_source_list.py
+FILE: tests/unit/test_context_prompt_hot_reload.py
 ```
+
+The test fails with `NotImplementedError` because `src/shared/config.py` has no implementation. It tests the public `load_context_prompt(config_dir)` interface: given a config directory containing `context-prompt.txt`, two consecutive calls must return the current file contents — proving the function reads from disk fresh each time (no caching), so an operator can update the file and the change takes effect on the next pipeline run without any code deployment.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -455,6 +457,22 @@ def handler(event: dict, context: object) -> dict:
     if any_failed:
         return {"transcript_status": "failed"}
     return {"transcript_status": "completed"}
+
+--- src/shared/config.py ---
+# src/shared/config.py
+# Stub — implementation pending (see B026, T039)
+
+
+def load_context_prompt(config_dir: str) -> str:
+    raise NotImplementedError("load_context_prompt not yet implemented")
+
+
+def load_settings(config_dir: str):
+    raise NotImplementedError("load_settings not yet implemented")
+
+
+def load_sources(config_dir: str):
+    raise NotImplementedError("load_sources not yet implemented")
 
 --- src/shared/models.py ---
 # src/shared/models.py
