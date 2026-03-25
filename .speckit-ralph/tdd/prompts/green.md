@@ -40,53 +40,163 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-The test fails correctly — `NoSuchKey` because the stub handler doesn't write the PipelineRun record to S3. This is the right failure for a RED test.
+Test fails with `NotImplementedError` — RED state confirmed.
 
 ```
-FILE: tests/unit/test_pipeline_run_metadata.py
+FILE: tests/unit/test_x_api_ingestion.py
 ```
 
-The test fails with `NoSuchKey` when trying to read `pipeline-runs/2026-03-24/run.json` from S3 — exactly the right RED failure, since the `handler` stub returns `{}` and writes nothing.
+The test:
+- Creates a `Source` dataclass object (not a plain dict) with `type="x"`
+- Patches `tweepy.Client` at the external boundary
+- Calls `ingest(source, since)` with proper typed arguments
+- Asserts result fields via **attribute notation** (`item.source_id`, `item.published_date`, `item.original_url`, `item.title`/`item.full_text`) matching the `ContentItem` dataclass contract
+- Fails with `NotImplementedError` — valid RED state
 
-**What changed from the previous version:**
-
-| Issue | Fix |
-|---|---|
-| Rule 4: mocked `load_sources` (internal) | Writes a real `sources.yaml` via `tmp_path`; path passed via `SOURCES_CONFIG` env var |
-| Rule 4: mocked `rss.ingest` / `web.ingest` (internal) | Mocks `feedparser.parse` (external library network call) and `urllib.request.urlopen` (network boundary) |
-| Rule 3: patches tightly coupled to module layout | Patches target external libraries, not internal module paths — survives any internal refactor |
-| Rule 6: `sources_succeeded >= 0` (meaningless) | `sources_succeeded == 2` (specific expected value) |
+Also created `src/shared/models.py` with `Source` and `ContentItem` dataclasses, since that module was absent from the filesystem.
 
 ## Existing Code (for context — extend or modify as needed)
 
 
 --- src/ingestion/handler.py ---
 # src/ingestion/handler.py
-# Stub — no implementation yet
+import json
+import os
+
+import boto3
+import yaml
+
+from src.ingestion.sources import rss, web
 
 
 def load_sources():
-    return []
+    config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    return [s for s in config.get("sources", []) if s.get("active", True)]
 
 
 def handler(event, context):
-    return {}
+    bucket = os.environ["PIPELINE_BUCKET"]
+    run_date = os.environ.get("RUN_DATE", "")
+    s3 = boto3.client("s3")
+
+    sources = load_sources()
+    sources_attempted = len(sources)
+    sources_succeeded = 0
+    all_items = []
+
+    ingesters = {"rss": rss.ingest, "web": web.ingest}
+
+    for source in sources:
+        source_type = source.get("type")
+        ingest_fn = ingesters.get(source_type)
+        if ingest_fn is None:
+            continue
+        try:
+            items = ingest_fn(source, since=None)
+            all_items.extend(items)
+            sources_succeeded += 1
+        except Exception:
+            pass
+
+    run_record = {
+        "sources_attempted": sources_attempted,
+        "sources_succeeded": sources_succeeded,
+        "items_ingested": len(all_items),
+        "transcription_jobs": 0,
+        "delivery_status": "pending",
+    }
+
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"pipeline-runs/{run_date}/run.json",
+        Body=json.dumps(run_record),
+        ContentType="application/json",
+    )
+
+    return run_record
 
 --- src/ingestion/sources/rss.py ---
 # src/ingestion/sources/rss.py
-# Stub — no implementation yet
+import feedparser
 
 
 def ingest(source, since):
-    return []
+    feed = feedparser.parse(source["url"])
+    if feed.bozo:
+        return []
+    items = []
+    for entry in feed.entries:
+        items.append({
+            "title": getattr(entry, "title", ""),
+            "url": getattr(entry, "link", ""),
+            "summary": getattr(entry, "summary", ""),
+            "source_id": source["id"],
+        })
+    return items
 
 --- src/ingestion/sources/web.py ---
 # src/ingestion/sources/web.py
-# Stub — no implementation yet
+import urllib.request
+from bs4 import BeautifulSoup
 
 
 def ingest(source, since):
-    return []
+    with urllib.request.urlopen(source["url"]) as response:
+        html = response.read()
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+    for article in soup.find_all("article"):
+        title_tag = article.find(["h1", "h2", "h3"])
+        title = title_tag.get_text(strip=True) if title_tag else ""
+        p_tag = article.find("p")
+        summary = p_tag.get_text(strip=True) if p_tag else ""
+        items.append({
+            "title": title,
+            "url": source["url"],
+            "summary": summary,
+            "source_id": source["id"],
+        })
+    return items
+
+--- src/ingestion/sources/x_api.py ---
+# src/ingestion/sources/x_api.py
+import tweepy
+
+
+def ingest(source, since):
+    raise NotImplementedError("X API ingestion not yet implemented")
+
+--- src/shared/models.py ---
+# src/shared/models.py
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional
+
+
+@dataclass
+class Source:
+    id: str
+    name: str
+    type: str  # rss / web / x / youtube / podcast
+    url: str
+    category: str
+    active: bool = True
+    priority: int = 1
+
+
+@dataclass
+class ContentItem:
+    id: str
+    title: str
+    source_id: str
+    source_name: str
+    published_date: datetime
+    full_text: str
+    original_url: str
+    content_format: str = "text"  # text / audio / video
+    transcript_status: str = "not_needed"  # pending / completed / failed / not_needed
 
 ## Plan Context (language, framework, project structure)
 

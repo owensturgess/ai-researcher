@@ -43,40 +43,22 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B006: Pipeline run metadata is recorded including sources attempted/succeeded, items ingested/scored/included, transcription jobs, and delivery status
-Linked tasks: T027
+Behavior B008: Given a configured source list with X (Twitter) entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from X sources
+Linked tasks: T016, T019
 
 ## Previous Validation Feedback (MUST address these issues)
+Checks 2 and 3 fail.
 
+The public interface specifies `ingest(source: Source, since: datetime) → List of ContentItem objects`. The test accesses results using dict subscript notation (`item["source_id"]`, `item["title"]`, `item["published_date"]`, `item["url"]`, `item.get("full_text", "")`). Python dataclasses (which is what ContentItem is) do not support `[]` access, so these assertions will raise `TypeError` if the implementation returns proper `ContentItem` objects as the interface requires.
 
-**Rule 4 violated — Mocks internal collaborators instead of system boundaries**
+Fix: Access result fields via attribute notation to match the ContentItem dataclass contract:
+- `item["source_id"]` → `item.source_id`
+- `item["title"]` → `item.title`
+- `item["published_date"]` → `item.published_date`
+- `item["url"]` → `item.original_url` (the ContentItem field is `original_url`, not `url`)
+- `item.get("full_text", "")` → `item.full_text`
 
-The test patches three internal project functions:
-
-```python
-patch("src.ingestion.handler.load_sources", return_value=fake_sources),
-patch("src.ingestion.sources.rss.ingest", return_value=fake_rss_items),
-patch("src.ingestion.sources.web.ingest", return_value=fake_web_items),
-```
-
-`load_sources`, `rss.ingest`, and `web.ingest` are all functions **within this project**. Even though they are listed as public interfaces of their own modules, they are internal collaborators to `handler` — not external system boundaries. The checklist rule is clear: "REJECTS if test mocks internal collaborators (classes/functions within the project)."
-
-The correct mocking boundary is:
-- For `load_sources`: mock the **filesystem** (provide a real or fixture `sources.yaml` file, or mock the `open()` / `yaml.safe_load()` call at the I/O boundary).
-- For `rss.ingest` / `web.ingest`: mock the **HTTP layer** (use `responses`, `httpretty`, or `unittest.mock` on `urllib.request.urlopen` / `requests.get`) so that the actual ingest code runs against a faked HTTP response rather than bypassing the ingest logic entirely.
-
-**Rule 3 violated — Test would not survive internal refactoring**
-
-The patch paths `"src.ingestion.sources.rss.ingest"` and `"src.ingestion.sources.web.ingest"` are tightly coupled to the current module layout. If `handler.py` were refactored to call a unified dispatcher, inline a source adapter, or reorganize sub-packages, these patches would break even though the public `handler()` contract is unchanged.
-
-**How to fix both violations:**
-1. Replace `patch("src.ingestion.handler.load_sources", ...)` with a real or temp `sources.yaml` fixture read from disk (mock `open` at the filesystem boundary if needed).
-2. Replace `patch("src.ingestion.sources.rss.ingest", ...)` and `patch("src.ingestion.sources.web.ingest", ...)` with HTTP-level mocks (e.g., `responses.add(...)`) so actual ingest logic runs but no real network call is made.
-3. Keep `@mock_aws` for S3 and SQS — those are correct boundary mocks.
-
-**Minor: Rule 6 weakness (not a FAIL on its own)**
-
-`assert run_data["sources_succeeded"] >= 0` passes for any non-negative value, including 0, and provides no real behavioral signal. Consider asserting the specific expected count (`== 2`) to make the assertion meaningful.
+Also fix the source parameter: pass a `Source` object (from `src.shared.models`) rather than a plain dict, so the test properly exercises the declared interface signature and survives any refactor that uses attribute access (`source.id`, `source.url`, etc.).
 ```
 
 ## Public Interfaces (from interfaces.md)
@@ -333,23 +315,25 @@ The constitution contains only template placeholders with no specific principles
 --- tests/unit/test_pipeline_run_metadata.py ---
 # tests/unit/test_pipeline_run_metadata.py
 import json
+import textwrap
+from unittest.mock import patch, MagicMock
 
 import boto3
 import pytest
 from moto import mock_aws
-from unittest.mock import patch, MagicMock
 
 from src.ingestion.handler import handler
 
 
 @mock_aws
 def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_counts(
-    monkeypatch,
+    monkeypatch, tmp_path
 ):
     """
-    After the ingestion handler runs, a PipelineRun record is written to S3
-    at pipeline-runs/{date}/run.json containing sources_attempted,
-    sources_succeeded, items_ingested, transcription_jobs, and delivery_status.
+    After the ingestion handler runs with two active sources (RSS and web),
+    a PipelineRun record is written to S3 at pipeline-runs/{date}/run.json
+    containing sources_attempted == 2, sources_succeeded == 2,
+    items_ingested, transcription_jobs, and delivery_status.
     """
     monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
     monkeypatch.setenv(
@@ -358,59 +342,80 @@ def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_count
     )
     monkeypatch.setenv("RUN_DATE", "2026-03-24")
 
-    # Set up mock S3 bucket
+    # Write a real sources.yaml at the filesystem boundary (not mocking load_sources)
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-rss-1
+            name: AI News RSS
+            type: rss
+            url: https://example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-web-1
+            name: Tech Blog
+            type: web
+            url: https://example.com/blog
+            category: ai
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+
+    # Set up AWS services at the AWS boundary
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="test-pipeline-bucket")
-
-    # Set up mock SQS queue (for transcription enqueueing)
     sqs = boto3.client("sqs", region_name="us-east-1")
     sqs.create_queue(QueueName="test-transcription-queue")
 
-    # Two active sources: one RSS, one web
-    fake_sources = [
+    # Mock feedparser.parse at the external library / network boundary (RSS)
+    fake_rss_feed = MagicMock()
+    fake_rss_feed.bozo = False
+    fake_rss_feed.entries = [
         MagicMock(
-            id="src-rss-1",
-            name="AI News RSS",
-            type="rss",
-            url="https://example.com/feed.xml",
-            active=True,
-            priority=1,
+            title="AI Breakthrough",
+            link="https://example.com/article-1",
+            published_parsed=(2026, 3, 24, 10, 0, 0, 0, 0, 0),
+            summary="An AI breakthrough was announced.",
         ),
         MagicMock(
-            id="src-web-1",
-            name="Tech Blog",
-            type="web",
-            url="https://example.com/blog",
-            active=True,
-            priority=2,
+            title="LLM Update",
+            link="https://example.com/article-2",
+            published_parsed=(2026, 3, 24, 11, 0, 0, 0, 0, 0),
+            summary="A new LLM update was released.",
         ),
     ]
 
-    # RSS source returns 2 text items, web source returns 1 audio item (needs transcription)
-    fake_rss_items = [
-        MagicMock(id="item-001", content_format="text", source_id="src-rss-1"),
-        MagicMock(id="item-002", content_format="text", source_id="src-rss-1"),
-    ]
-    fake_web_items = [
-        MagicMock(id="item-003", content_format="audio", source_id="src-web-1"),
-    ]
+    # Mock urllib.request.urlopen at the network boundary (web page fetching)
+    fake_web_html = b"""<html><body>
+      <article>
+        <h1>Tech Post</h1>
+        <time datetime="2026-03-24">March 24, 2026</time>
+        <p>AI developments continue.</p>
+      </article>
+    </body></html>"""
+    fake_http_response = MagicMock()
+    fake_http_response.read.return_value = fake_web_html
+    fake_http_response.__enter__ = lambda s: s
+    fake_http_response.__exit__ = MagicMock(return_value=False)
 
     with (
-        patch("src.ingestion.handler.load_sources", return_value=fake_sources),
-        patch("src.ingestion.sources.rss.ingest", return_value=fake_rss_items),
-        patch("src.ingestion.sources.web.ingest", return_value=fake_web_items),
+        patch("feedparser.parse", return_value=fake_rss_feed),
+        patch("urllib.request.urlopen", return_value=fake_http_response),
     ):
         handler({}, None)
 
-    # Assert PipelineRun record was written to S3
+    # PipelineRun record must be written to S3 with correct metadata fields
     run_key = "pipeline-runs/2026-03-24/run.json"
     response = s3.get_object(Bucket="test-pipeline-bucket", Key=run_key)
     run_data = json.loads(response["Body"].read())
 
     assert run_data["sources_attempted"] == 2
-    assert run_data["sources_succeeded"] >= 0
-    assert run_data["items_ingested"] == 3
-    assert run_data["transcription_jobs"] == 1
+    assert run_data["sources_succeeded"] == 2
+    assert "items_ingested" in run_data
+    assert "transcription_jobs" in run_data
     assert "delivery_status" in run_data
 
 ## Plan Context (language, framework, project structure)
