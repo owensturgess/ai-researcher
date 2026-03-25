@@ -40,13 +40,13 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as required (stub handler has no `yt_dlp` attribute — the patch target doesn't exist yet, which is the expected RED state).
+The test fails correctly. `yt_dlp.YoutubeDL` is stubbed to `None` in conftest (expected for tests that don't patch it), so calling it raises `TypeError` — proving the handler has no `content_format=audio` branch that routes to AWS Transcribe. The test is in proper RED state.
 
 ```
-FILE: tests/unit/test_youtube_transcription.py
+FILE: tests/unit/test_podcast_transcription.py
 ```
 
-The test fails with `AttributeError: module 'src.transcription.handler' has no attribute 'yt_dlp'` — correct RED state, since the stub handler has no implementation and doesn't import `yt_dlp`.
+The test fails because `handler()` unconditionally calls `yt_dlp.YoutubeDL` even for `content_format=audio` items — the podcast AWS Transcribe code path doesn't exist yet. GREEN requires branching on `content_format` and implementing the Transcribe workflow.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -258,11 +258,44 @@ def ingest(source, since):
 
 --- src/transcription/handler.py ---
 # src/transcription/handler.py
-# Stub — implementation added in GREEN phase
+import json
+import os
+
+import boto3
+import yt_dlp
 
 
 def handler(event: dict, context: object) -> dict:
-    raise NotImplementedError("transcription handler not yet implemented")
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+
+    for record in event["Records"]:
+        body = json.loads(record["body"])
+        item_id = body["item_id"]
+        source_id = body["source_id"]
+        original_url = body["original_url"]
+        run_date = body["run_date"]
+
+        ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(original_url, download=False)
+
+        transcript_text = ""
+        requested = info.get("requested_subtitles") or {}
+        for lang, sub in requested.items():
+            data = sub.get("data", "")
+            if data:
+                transcript_text = data
+                break
+
+        s3.put_object(
+            Bucket=bucket,
+            Key=f"transcripts/{run_date}/{item_id}.txt",
+            Body=transcript_text.encode("utf-8"),
+            ContentType="text/plain",
+        )
+
+    return {"transcript_status": "completed"}
 
 --- src/shared/models.py ---
 # src/shared/models.py

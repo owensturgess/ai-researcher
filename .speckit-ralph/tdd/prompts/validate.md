@@ -41,8 +41,8 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_youtube_transcription.py
-# tests/unit/test_youtube_transcription.py
+# tests/unit/test_podcast_transcription.py
+# tests/unit/test_podcast_transcription.py
 import json
 from unittest.mock import patch, MagicMock
 
@@ -54,14 +54,14 @@ from src.transcription.handler import handler
 
 
 @mock_aws
-def test_youtube_transcript_retrieved_via_ytdlp_subtitles_and_written_to_s3(
-    monkeypatch, tmp_path
+def test_podcast_episode_audio_transcribed_via_aws_transcribe_and_written_to_s3(
+    monkeypatch,
 ):
     """
-    Given a YouTube video item on the transcription queue, when the handler
-    processes it and yt-dlp can download subtitles, the transcript text is
-    written to S3 at transcripts/{date}/{item_id}.txt and transcript_status
-    is 'completed' — without falling back to audio extraction.
+    Given a podcast episode item on the transcription queue (content_format=audio),
+    when the handler processes it, the audio is downloaded, sent to AWS Transcribe,
+    and the resulting transcript text is written to S3 at
+    transcripts/{date}/{item_id}.txt with transcript_status 'completed'.
     """
     monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
     monkeypatch.setenv("RUN_DATE", "2026-03-24")
@@ -69,21 +69,21 @@ def test_youtube_transcript_retrieved_via_ytdlp_subtitles_and_written_to_s3(
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="test-pipeline-bucket")
 
-    item_id = "yt-item-001"
-    source_id = "yt-source-1"
-    video_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    subtitle_text = "This is the full transcript of the YouTube video."
+    item_id = "podcast-item-001"
+    source_id = "podcast-source-1"
+    audio_url = "https://example.com/podcast/ep42.mp3"
+    transcript_text = "Welcome to episode 42 about the future of agentic AI systems."
 
     # Write the raw ContentItem to S3 (the handler reads it to get item details)
     content_item = {
         "id": item_id,
-        "title": "AI Developments Explained",
+        "title": "Episode 42: The Future of Agentic AI",
         "source_id": source_id,
-        "source_name": "AI Channel",
-        "published_date": "2026-03-24T10:00:00+00:00",
+        "source_name": "AI Podcast",
+        "published_date": "2026-03-24T09:00:00+00:00",
         "full_text": "",
-        "original_url": video_url,
-        "content_format": "video",
+        "original_url": audio_url,
+        "content_format": "audio",
         "transcript_status": "pending",
     }
     s3.put_object(
@@ -92,32 +92,70 @@ def test_youtube_transcript_retrieved_via_ytdlp_subtitles_and_written_to_s3(
         Body=json.dumps(content_item),
     )
 
-    # SQS event payload — yt-dlp subtitle path is the primary transcript source
-    sqs_message_body = json.dumps(
-        {
-            "item_id": item_id,
-            "source_id": source_id,
-            "content_format": "video",
-            "original_url": video_url,
-            "run_date": "2026-03-24",
+    # Write the Transcribe output JSON to S3 — simulates what AWS Transcribe
+    # deposits at its output S3 location once the job completes.
+    transcribe_output = {
+        "results": {
+            "transcripts": [{"transcript": transcript_text}]
         }
+    }
+    transcribe_output_key = f"transcribe-output/2026-03-24/{item_id}.json"
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=transcribe_output_key,
+        Body=json.dumps(transcribe_output),
     )
-    event = {"Records": [{"body": sqs_message_body}]}
 
-    # Mock yt-dlp at the external boundary — subtitles available, no audio fallback
-    mock_ydl_instance = MagicMock()
-    mock_ydl_instance.__enter__ = lambda s: s
-    mock_ydl_instance.__exit__ = MagicMock(return_value=False)
-    mock_ydl_instance.extract_info.return_value = {
-        "id": "dQw4w9WgXcQ",
-        "title": "AI Developments Explained",
-        "subtitles": {"en": [{"ext": "vtt", "data": subtitle_text}]},
-        "requested_subtitles": {"en": {"ext": "vtt", "data": subtitle_text}},
+    # SQS event payload for a podcast audio item
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "item_id": item_id,
+                        "source_id": source_id,
+                        "content_format": "audio",
+                        "original_url": audio_url,
+                        "run_date": "2026-03-24",
+                    }
+                )
+            }
+        ]
     }
 
-    mock_ydl_class = MagicMock(return_value=mock_ydl_instance)
+    # Mock audio download at the network boundary
+    fake_audio_bytes = b"FAKE_MP3_AUDIO_DATA"
+    mock_http_response = MagicMock()
+    mock_http_response.read.return_value = fake_audio_bytes
+    mock_http_response.__enter__ = lambda s: s
+    mock_http_response.__exit__ = MagicMock(return_value=False)
 
-    with patch("src.transcription.handler.yt_dlp.YoutubeDL", mock_ydl_class):
+    # Mock AWS Transcribe at the service boundary: job starts and immediately
+    # returns COMPLETED with a pointer to the transcript output in S3.
+    transcript_output_uri = (
+        f"https://s3.amazonaws.com/test-pipeline-bucket/{transcribe_output_key}"
+    )
+    mock_transcribe = MagicMock()
+    mock_transcribe.start_transcription_job.return_value = {}
+    mock_transcribe.get_transcription_job.return_value = {
+        "TranscriptionJob": {
+            "TranscriptionJobStatus": "COMPLETED",
+            "Transcript": {"TranscriptFileUri": transcript_output_uri},
+        }
+    }
+
+    # Capture the moto-patched boto3.client so we can delegate S3 calls to it
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service == "transcribe":
+            return mock_transcribe
+        return moto_boto3_client(service, **kw)
+
+    with (
+        patch("urllib.request.urlopen", return_value=mock_http_response),
+        patch("src.transcription.handler.boto3.client", side_effect=client_factory),
+    ):
         result = handler(event, None)
 
     # Transcript must be written to S3 at the canonical path
@@ -125,7 +163,7 @@ def test_youtube_transcript_retrieved_via_ytdlp_subtitles_and_written_to_s3(
     response = s3.get_object(Bucket="test-pipeline-bucket", Key=transcript_key)
     stored_transcript = response["Body"].read().decode("utf-8")
 
-    assert subtitle_text in stored_transcript
+    assert transcript_text in stored_transcript
     assert result["transcript_status"] == "completed"
 
 ## Public Interfaces (from interfaces.md)
