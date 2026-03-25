@@ -34,6 +34,14 @@ def handler(event, context):
             continue
         try:
             items = ingest_fn(source, since=None)
+            for i, item in enumerate(items):
+                item_key = f"raw/{run_date}/{source['id']}/{i}.json"
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=item_key,
+                    Body=json.dumps(item),
+                    ContentType="application/json",
+                )
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:

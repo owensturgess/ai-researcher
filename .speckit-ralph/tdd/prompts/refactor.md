@@ -95,15 +95,15 @@ def ingest(source, since):
     feed = feedparser.parse(source["url"])
     if feed.bozo:
         return []
-    items = []
-    for entry in feed.entries:
-        items.append({
+    return [
+        {
             "title": getattr(entry, "title", ""),
             "url": getattr(entry, "link", ""),
             "summary": getattr(entry, "summary", ""),
             "source_id": source["id"],
-        })
-    return items
+        }
+        for entry in feed.entries
+    ]
 
 --- src/ingestion/sources/web.py ---
 # src/ingestion/sources/web.py
@@ -198,6 +198,128 @@ def ingest(source, since):
         ))
     return items
 
+--- src/ingestion/sources/podcast.py ---
+# src/ingestion/sources/podcast.py
+from datetime import datetime, timezone
+
+import feedparser
+
+from src.shared.models import ContentItem
+
+
+def ingest(source, since):
+    feed = feedparser.parse(source.url)
+    if feed.bozo:
+        return []
+    items = []
+    for entry in feed.entries:
+        published_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        if since and published_date < since:
+            continue
+        enclosures = getattr(entry, "enclosures", [])
+        if not enclosures:
+            continue
+        enclosure_url = enclosures[0].href
+        items.append(ContentItem(
+            id=enclosure_url,
+            title=entry.title,
+            source_id=source.id,
+            source_name=source.name,
+            published_date=published_date,
+            full_text="",
+            original_url=enclosure_url,
+            content_format="audio",
+        ))
+    return items
+
+--- src/transcription/handler.py ---
+# src/transcription/handler.py
+import json
+import os
+import time
+import urllib.parse
+import urllib.request
+
+import boto3
+import yt_dlp
+
+
+def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
+    with urllib.request.urlopen(original_url) as response:
+        audio_bytes = response.read()
+
+    audio_key = f"audio/{run_date}/{item_id}.mp3"
+    s3.put_object(Bucket=bucket, Key=audio_key, Body=audio_bytes)
+
+    transcribe = boto3.client("transcribe")
+    job_name = f"transcribe-{run_date}-{item_id}".replace("/", "-")
+    transcribe.start_transcription_job(
+        TranscriptionJobName=job_name,
+        Media={"MediaFileUri": f"s3://{bucket}/{audio_key}"},
+        MediaFormat="mp3",
+        LanguageCode="en-US",
+        OutputBucketName=bucket,
+        OutputKey=f"transcribe-output/{run_date}/{item_id}.json",
+    )
+
+    while True:
+        resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
+        job = resp["TranscriptionJob"]
+        status = job["TranscriptionJobStatus"]
+        if status == "COMPLETED":
+            transcript_uri = job["Transcript"]["TranscriptFileUri"]
+            break
+        elif status == "FAILED":
+            return ""
+        time.sleep(5)
+
+    parsed = urllib.parse.urlparse(transcript_uri)
+    path_parts = parsed.path.lstrip("/").split("/", 1)
+    transcript_bucket = path_parts[0]
+    transcript_key = path_parts[1]
+
+    obj = s3.get_object(Bucket=transcript_bucket, Key=transcript_key)
+    transcript_data = json.loads(obj["Body"].read())
+    transcripts = transcript_data.get("results", {}).get("transcripts", [])
+    return transcripts[0]["transcript"] if transcripts else ""
+
+
+def handler(event: dict, context: object) -> dict:
+    bucket = os.environ["PIPELINE_BUCKET"]
+    s3 = boto3.client("s3")
+
+    for record in event["Records"]:
+        body = json.loads(record["body"])
+        item_id = body["item_id"]
+        source_id = body["source_id"]
+        original_url = body["original_url"]
+        run_date = body["run_date"]
+        content_format = body.get("content_format", "video")
+
+        if content_format == "audio":
+            transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
+        else:
+            ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(original_url, download=False)
+
+            transcript_text = ""
+            requested = info.get("requested_subtitles") or {}
+            for lang, sub in requested.items():
+                data = sub.get("data", "")
+                if data:
+                    transcript_text = data
+                    break
+
+        s3.put_object(
+            Bucket=bucket,
+            Key=f"transcripts/{run_date}/{item_id}.txt",
+            Body=transcript_text.encode("utf-8"),
+            ContentType="text/plain",
+        )
+
+    return {"transcript_status": "completed"}
+
 --- src/shared/models.py ---
 # src/shared/models.py
 from dataclasses import dataclass, field
@@ -230,6 +352,93 @@ class ContentItem:
 
 ## Current Tests
 
+
+--- tests/unit/test_youtube_transcription.py ---
+# tests/unit/test_youtube_transcription.py
+import json
+from unittest.mock import patch, MagicMock
+
+import boto3
+import pytest
+from moto import mock_aws
+
+from src.transcription.handler import handler
+
+
+@mock_aws
+def test_youtube_transcript_retrieved_via_ytdlp_subtitles_and_written_to_s3(
+    monkeypatch, tmp_path
+):
+    """
+    Given a YouTube video item on the transcription queue, when the handler
+    processes it and yt-dlp can download subtitles, the transcript text is
+    written to S3 at transcripts/{date}/{item_id}.txt and transcript_status
+    is 'completed' — without falling back to audio extraction.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item_id = "yt-item-001"
+    source_id = "yt-source-1"
+    video_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    subtitle_text = "This is the full transcript of the YouTube video."
+
+    # Write the raw ContentItem to S3 (the handler reads it to get item details)
+    content_item = {
+        "id": item_id,
+        "title": "AI Developments Explained",
+        "source_id": source_id,
+        "source_name": "AI Channel",
+        "published_date": "2026-03-24T10:00:00+00:00",
+        "full_text": "",
+        "original_url": video_url,
+        "content_format": "video",
+        "transcript_status": "pending",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{source_id}/{item_id}.json",
+        Body=json.dumps(content_item),
+    )
+
+    # SQS event payload — yt-dlp subtitle path is the primary transcript source
+    sqs_message_body = json.dumps(
+        {
+            "item_id": item_id,
+            "source_id": source_id,
+            "content_format": "video",
+            "original_url": video_url,
+            "run_date": "2026-03-24",
+        }
+    )
+    event = {"Records": [{"body": sqs_message_body}]}
+
+    # Mock yt-dlp at the external boundary — subtitles available, no audio fallback
+    mock_ydl_instance = MagicMock()
+    mock_ydl_instance.__enter__ = lambda s: s
+    mock_ydl_instance.__exit__ = MagicMock(return_value=False)
+    mock_ydl_instance.extract_info.return_value = {
+        "id": "dQw4w9WgXcQ",
+        "title": "AI Developments Explained",
+        "subtitles": {"en": [{"ext": "vtt", "data": subtitle_text}]},
+        "requested_subtitles": {"en": {"ext": "vtt", "data": subtitle_text}},
+    }
+
+    mock_ydl_class = MagicMock(return_value=mock_ydl_instance)
+
+    with patch("src.transcription.handler.yt_dlp.YoutubeDL", mock_ydl_class):
+        result = handler(event, None)
+
+    # Transcript must be written to S3 at the canonical path
+    transcript_key = f"transcripts/2026-03-24/{item_id}.txt"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=transcript_key)
+    stored_transcript = response["Body"].read().decode("utf-8")
+
+    assert subtitle_text in stored_transcript
+    assert result["transcript_status"] == "completed"
 
 --- tests/unit/test_pipeline_run_metadata.py ---
 # tests/unit/test_pipeline_run_metadata.py
@@ -336,6 +545,58 @@ def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_count
     assert "items_ingested" in run_data
     assert "transcription_jobs" in run_data
     assert "delivery_status" in run_data
+
+--- tests/unit/test_podcast_ingestion.py ---
+# tests/unit/test_podcast_ingestion.py
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from src.ingestion.sources.podcast import ingest
+from src.shared.models import Source
+
+
+def test_podcast_ingestion_returns_audio_content_items_for_recent_episodes():
+    """
+    Given a podcast source and a since datetime, when ingest() is called,
+    it returns ContentItem objects with content_format=audio for episodes
+    published after `since`, each with source_id, title, published_date,
+    and original_url set to the enclosure (audio file) URL.
+    """
+    source = Source(
+        id="podcast-source-1",
+        name="AI Podcast",
+        type="podcast",
+        url="https://example.com/podcast/feed.xml",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    episode_title = "Episode 42: The Future of Agentic AI"
+    episode_enclosure_url = "https://example.com/podcast/ep42.mp3"
+
+    mock_entry = MagicMock()
+    mock_entry.title = episode_title
+    mock_entry.published_parsed = (2026, 3, 24, 9, 0, 0, 0, 0, 0)
+    mock_entry.enclosures = [
+        MagicMock(href=episode_enclosure_url, type="audio/mpeg")
+    ]
+
+    mock_feed = MagicMock()
+    mock_feed.bozo = False
+    mock_feed.entries = [mock_entry]
+
+    with patch("feedparser.parse", return_value=mock_feed):
+        results = ingest(source, since)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item.source_id == "podcast-source-1"
+    assert item.title == episode_title
+    assert item.content_format == "audio"
+    assert item.original_url == episode_enclosure_url
+    assert item.published_date >= since
 
 --- tests/unit/test_x_api_ingestion.py ---
 # tests/unit/test_x_api_ingestion.py
@@ -457,6 +718,131 @@ def test_youtube_ingestion_returns_video_content_items_for_recent_videos():
     assert item.content_format == "video"
     assert video_id in item.original_url
     assert item.published_date == datetime(2026, 3, 24, 10, 0, 0, tzinfo=timezone.utc)
+
+--- tests/unit/test_podcast_transcription.py ---
+# tests/unit/test_podcast_transcription.py
+import json
+from unittest.mock import patch, MagicMock
+
+import boto3
+import pytest
+from moto import mock_aws
+
+from src.transcription.handler import handler
+
+
+@mock_aws
+def test_podcast_episode_audio_transcribed_via_aws_transcribe_and_written_to_s3(
+    monkeypatch,
+):
+    """
+    Given a podcast episode item on the transcription queue (content_format=audio),
+    when the handler processes it, the audio is downloaded, sent to AWS Transcribe,
+    and the resulting transcript text is written to S3 at
+    transcripts/{date}/{item_id}.txt with transcript_status 'completed'.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item_id = "podcast-item-001"
+    source_id = "podcast-source-1"
+    audio_url = "https://example.com/podcast/ep42.mp3"
+    transcript_text = "Welcome to episode 42 about the future of agentic AI systems."
+
+    # Write the raw ContentItem to S3 (the handler reads it to get item details)
+    content_item = {
+        "id": item_id,
+        "title": "Episode 42: The Future of Agentic AI",
+        "source_id": source_id,
+        "source_name": "AI Podcast",
+        "published_date": "2026-03-24T09:00:00+00:00",
+        "full_text": "",
+        "original_url": audio_url,
+        "content_format": "audio",
+        "transcript_status": "pending",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{source_id}/{item_id}.json",
+        Body=json.dumps(content_item),
+    )
+
+    # Write the Transcribe output JSON to S3 — simulates what AWS Transcribe
+    # deposits at its output S3 location once the job completes.
+    transcribe_output = {
+        "results": {
+            "transcripts": [{"transcript": transcript_text}]
+        }
+    }
+    transcribe_output_key = f"transcribe-output/2026-03-24/{item_id}.json"
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=transcribe_output_key,
+        Body=json.dumps(transcribe_output),
+    )
+
+    # SQS event payload for a podcast audio item
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "item_id": item_id,
+                        "source_id": source_id,
+                        "content_format": "audio",
+                        "original_url": audio_url,
+                        "run_date": "2026-03-24",
+                    }
+                )
+            }
+        ]
+    }
+
+    # Mock audio download at the network boundary
+    fake_audio_bytes = b"FAKE_MP3_AUDIO_DATA"
+    mock_http_response = MagicMock()
+    mock_http_response.read.return_value = fake_audio_bytes
+    mock_http_response.__enter__ = lambda s: s
+    mock_http_response.__exit__ = MagicMock(return_value=False)
+
+    # Mock AWS Transcribe at the service boundary: job starts and immediately
+    # returns COMPLETED with a pointer to the transcript output in S3.
+    transcript_output_uri = (
+        f"https://s3.amazonaws.com/test-pipeline-bucket/{transcribe_output_key}"
+    )
+    mock_transcribe = MagicMock()
+    mock_transcribe.start_transcription_job.return_value = {}
+    mock_transcribe.get_transcription_job.return_value = {
+        "TranscriptionJob": {
+            "TranscriptionJobStatus": "COMPLETED",
+            "Transcript": {"TranscriptFileUri": transcript_output_uri},
+        }
+    }
+
+    # Capture the moto-patched boto3.client so we can delegate S3 calls to it
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service == "transcribe":
+            return mock_transcribe
+        return moto_boto3_client(service, **kw)
+
+    with (
+        patch("urllib.request.urlopen", return_value=mock_http_response),
+        patch("src.transcription.handler.boto3.client", side_effect=client_factory),
+    ):
+        result = handler(event, None)
+
+    # Transcript must be written to S3 at the canonical path
+    transcript_key = f"transcripts/2026-03-24/{item_id}.txt"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=transcript_key)
+    stored_transcript = response["Body"].read().decode("utf-8")
+
+    assert transcript_text in stored_transcript
+    assert result["transcript_status"] == "completed"
 
 ## Public Interfaces (DO NOT change signatures)
 

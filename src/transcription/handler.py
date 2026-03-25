@@ -9,12 +9,36 @@ import boto3
 import yt_dlp
 
 
-def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
+def _upload_audio(s3, bucket, original_url, audio_key):
     with urllib.request.urlopen(original_url) as response:
         audio_bytes = response.read()
-
-    audio_key = f"audio/{run_date}/{item_id}.mp3"
     s3.put_object(Bucket=bucket, Key=audio_key, Body=audio_bytes)
+
+
+def _poll_transcription_job(transcribe, job_name):
+    while True:
+        resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
+        job = resp["TranscriptionJob"]
+        status = job["TranscriptionJobStatus"]
+        if status == "COMPLETED":
+            return job["Transcript"]["TranscriptFileUri"]
+        if status == "FAILED":
+            return None
+        time.sleep(5)
+
+
+def _fetch_transcript_text(s3, transcript_uri):
+    parsed = urllib.parse.urlparse(transcript_uri)
+    path_parts = parsed.path.lstrip("/").split("/", 1)
+    obj = s3.get_object(Bucket=path_parts[0], Key=path_parts[1])
+    transcript_data = json.loads(obj["Body"].read())
+    transcripts = transcript_data.get("results", {}).get("transcripts", [])
+    return transcripts[0]["transcript"] if transcripts else ""
+
+
+def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
+    audio_key = f"audio/{run_date}/{item_id}.mp3"
+    _upload_audio(s3, bucket, original_url, audio_key)
 
     transcribe = boto3.client("transcribe")
     job_name = f"transcribe-{run_date}-{item_id}".replace("/", "-")
@@ -27,26 +51,23 @@ def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
         OutputKey=f"transcribe-output/{run_date}/{item_id}.json",
     )
 
-    while True:
-        resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
-        job = resp["TranscriptionJob"]
-        status = job["TranscriptionJobStatus"]
-        if status == "COMPLETED":
-            transcript_uri = job["Transcript"]["TranscriptFileUri"]
-            break
-        elif status == "FAILED":
-            return ""
-        time.sleep(5)
+    transcript_uri = _poll_transcription_job(transcribe, job_name)
+    if transcript_uri is None:
+        return ""
+    return _fetch_transcript_text(s3, transcript_uri)
 
-    parsed = urllib.parse.urlparse(transcript_uri)
-    path_parts = parsed.path.lstrip("/").split("/", 1)
-    transcript_bucket = path_parts[0]
-    transcript_key = path_parts[1]
 
-    obj = s3.get_object(Bucket=transcript_bucket, Key=transcript_key)
-    transcript_data = json.loads(obj["Body"].read())
-    transcripts = transcript_data.get("results", {}).get("transcripts", [])
-    return transcripts[0]["transcript"] if transcripts else ""
+def _extract_youtube_transcript(original_url):
+    ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(original_url, download=False)
+
+    requested = info.get("requested_subtitles") or {}
+    for sub in requested.values():
+        data = sub.get("data", "")
+        if data:
+            return data
+    return ""
 
 
 def handler(event: dict, context: object) -> dict:
@@ -56,7 +77,6 @@ def handler(event: dict, context: object) -> dict:
     for record in event["Records"]:
         body = json.loads(record["body"])
         item_id = body["item_id"]
-        source_id = body["source_id"]
         original_url = body["original_url"]
         run_date = body["run_date"]
         content_format = body.get("content_format", "video")
@@ -64,17 +84,7 @@ def handler(event: dict, context: object) -> dict:
         if content_format == "audio":
             transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
         else:
-            ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(original_url, download=False)
-
-            transcript_text = ""
-            requested = info.get("requested_subtitles") or {}
-            for lang, sub in requested.items():
-                data = sub.get("data", "")
-                if data:
-                    transcript_text = data
-                    break
+            transcript_text = _extract_youtube_transcript(original_url)
 
         s3.put_object(
             Bucket=bucket,

@@ -40,13 +40,15 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-The test fails correctly. `yt_dlp.YoutubeDL` is stubbed to `None` in conftest (expected for tests that don't patch it), so calling it raises `TypeError` — proving the handler has no `content_format=audio` branch that routes to AWS Transcribe. The test is in proper RED state.
-
 ```
-FILE: tests/unit/test_podcast_transcription.py
+FILE: tests/unit/test_ingestion_error_isolation.py
 ```
 
-The test fails because `handler()` unconditionally calls `yt_dlp.YoutubeDL` even for `content_format=audio` items — the podcast AWS Transcribe code path doesn't exist yet. GREEN requires branching on `content_format` and implementing the Transcribe workflow.
+The test:
+- Sets up two active RSS sources (one at `failing.example.com`, one at `healthy.example.com`)
+- Mocks `feedparser.parse` at the network boundary with a `side_effect` that raises `HTTPError(429)` for the failing URL and returns a valid feed for the healthy one
+- Asserts `sources_attempted == 2`, `sources_succeeded == 1` — proving the failure was isolated and the handler didn't abort
+- Asserts the healthy source's items were written to S3 — proving normal processing continued past the failed source
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -260,9 +262,73 @@ def ingest(source, since):
 # src/transcription/handler.py
 import json
 import os
+import time
+import urllib.parse
+import urllib.request
 
 import boto3
 import yt_dlp
+
+
+def _upload_audio(s3, bucket, original_url, audio_key):
+    with urllib.request.urlopen(original_url) as response:
+        audio_bytes = response.read()
+    s3.put_object(Bucket=bucket, Key=audio_key, Body=audio_bytes)
+
+
+def _poll_transcription_job(transcribe, job_name):
+    while True:
+        resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
+        job = resp["TranscriptionJob"]
+        status = job["TranscriptionJobStatus"]
+        if status == "COMPLETED":
+            return job["Transcript"]["TranscriptFileUri"]
+        if status == "FAILED":
+            return None
+        time.sleep(5)
+
+
+def _fetch_transcript_text(s3, transcript_uri):
+    parsed = urllib.parse.urlparse(transcript_uri)
+    path_parts = parsed.path.lstrip("/").split("/", 1)
+    obj = s3.get_object(Bucket=path_parts[0], Key=path_parts[1])
+    transcript_data = json.loads(obj["Body"].read())
+    transcripts = transcript_data.get("results", {}).get("transcripts", [])
+    return transcripts[0]["transcript"] if transcripts else ""
+
+
+def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
+    audio_key = f"audio/{run_date}/{item_id}.mp3"
+    _upload_audio(s3, bucket, original_url, audio_key)
+
+    transcribe = boto3.client("transcribe")
+    job_name = f"transcribe-{run_date}-{item_id}".replace("/", "-")
+    transcribe.start_transcription_job(
+        TranscriptionJobName=job_name,
+        Media={"MediaFileUri": f"s3://{bucket}/{audio_key}"},
+        MediaFormat="mp3",
+        LanguageCode="en-US",
+        OutputBucketName=bucket,
+        OutputKey=f"transcribe-output/{run_date}/{item_id}.json",
+    )
+
+    transcript_uri = _poll_transcription_job(transcribe, job_name)
+    if transcript_uri is None:
+        return ""
+    return _fetch_transcript_text(s3, transcript_uri)
+
+
+def _extract_youtube_transcript(original_url):
+    ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(original_url, download=False)
+
+    requested = info.get("requested_subtitles") or {}
+    for sub in requested.values():
+        data = sub.get("data", "")
+        if data:
+            return data
+    return ""
 
 
 def handler(event: dict, context: object) -> dict:
@@ -272,21 +338,14 @@ def handler(event: dict, context: object) -> dict:
     for record in event["Records"]:
         body = json.loads(record["body"])
         item_id = body["item_id"]
-        source_id = body["source_id"]
         original_url = body["original_url"]
         run_date = body["run_date"]
+        content_format = body.get("content_format", "video")
 
-        ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(original_url, download=False)
-
-        transcript_text = ""
-        requested = info.get("requested_subtitles") or {}
-        for lang, sub in requested.items():
-            data = sub.get("data", "")
-            if data:
-                transcript_text = data
-                break
+        if content_format == "audio":
+            transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
+        else:
+            transcript_text = _extract_youtube_transcript(original_url)
 
         s3.put_object(
             Bucket=bucket,
