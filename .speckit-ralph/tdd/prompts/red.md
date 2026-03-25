@@ -43,23 +43,8 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B008: Given a configured source list with X (Twitter) entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from X sources
-Linked tasks: T016, T019
-
-## Previous Validation Feedback (MUST address these issues)
-Checks 2 and 3 fail.
-
-The public interface specifies `ingest(source: Source, since: datetime) → List of ContentItem objects`. The test accesses results using dict subscript notation (`item["source_id"]`, `item["title"]`, `item["published_date"]`, `item["url"]`, `item.get("full_text", "")`). Python dataclasses (which is what ContentItem is) do not support `[]` access, so these assertions will raise `TypeError` if the implementation returns proper `ContentItem` objects as the interface requires.
-
-Fix: Access result fields via attribute notation to match the ContentItem dataclass contract:
-- `item["source_id"]` → `item.source_id`
-- `item["title"]` → `item.title`
-- `item["published_date"]` → `item.published_date`
-- `item["url"]` → `item.original_url` (the ContentItem field is `original_url`, not `url`)
-- `item.get("full_text", "")` → `item.full_text`
-
-Also fix the source parameter: pass a `Source` object (from `src.shared.models`) rather than a plain dict, so the test properly exercises the declared interface signature and survives any refactor that uses attribute access (`source.id`, `source.url`, etc.).
-```
+Behavior B009: Given a configured source list with YouTube entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from YouTube sources
+Linked tasks: T017, T019
 
 ## Public Interfaces (from interfaces.md)
 
@@ -417,6 +402,127 @@ def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_count
     assert "items_ingested" in run_data
     assert "transcription_jobs" in run_data
     assert "delivery_status" in run_data
+
+--- tests/unit/test_x_api_ingestion.py ---
+# tests/unit/test_x_api_ingestion.py
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.ingestion.sources.x_api import ingest
+from src.shared.models import Source
+
+
+def test_x_api_ingestion_returns_content_items_for_recent_tweets():
+    """
+    Given an X source and a since datetime, when ingest() is called,
+    it returns ContentItem objects for tweets published after `since`,
+    each with source_id, title, published_date, original_url, and full_text
+    populated from the tweet data.
+    """
+    source = Source(
+        id="x-source-1",
+        name="Test X Account",
+        type="x",
+        url="https://twitter.com/testaccount",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    tweet_id = "1234567890"
+    tweet_text = "Exciting AI development announced today! #AI"
+    tweet_created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
+
+    mock_tweet = MagicMock()
+    mock_tweet.id = tweet_id
+    mock_tweet.text = tweet_text
+    mock_tweet.created_at = tweet_created_at
+
+    mock_response = MagicMock()
+    mock_response.data = [mock_tweet]
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.search_recent_tweets.return_value = mock_response
+
+    with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client_instance):
+        results = ingest(source, since)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item.source_id == "x-source-1"
+    assert tweet_text in item.title or tweet_text in item.full_text
+    assert item.published_date == tweet_created_at
+    assert tweet_id in item.original_url
+
+--- tests/unit/test_youtube_ingestion.py ---
+# tests/unit/test_youtube_ingestion.py
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from src.ingestion.sources.youtube import ingest
+from src.shared.models import Source
+
+
+def test_youtube_ingestion_returns_video_content_items_for_recent_videos():
+    """
+    Given a YouTube source and a since datetime, when ingest() is called,
+    it returns ContentItem objects with content_format=video for videos
+    published after `since`, each with source_id, title, published_date,
+    and original_url populated from the YouTube API response.
+    """
+    source = Source(
+        id="yt-source-1",
+        name="AI Channel",
+        type="youtube",
+        url="https://www.youtube.com/channel/UC_test_channel_id",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    video_id = "dQw4w9WgXcQ"
+    video_title = "Latest AI Developments Explained"
+    published_at = "2026-03-24T10:00:00Z"
+
+    mock_search_response = {
+        "items": [
+            {
+                "id": {"videoId": video_id},
+                "snippet": {
+                    "title": video_title,
+                    "publishedAt": published_at,
+                    "channelTitle": "AI Channel",
+                },
+            }
+        ]
+    }
+
+    mock_list_request = MagicMock()
+    mock_list_request.execute.return_value = mock_search_response
+
+    mock_search = MagicMock()
+    mock_search.list.return_value = mock_list_request
+
+    mock_youtube_client = MagicMock()
+    mock_youtube_client.search.return_value = mock_search
+
+    with patch(
+        "src.ingestion.sources.youtube.build",
+        return_value=mock_youtube_client,
+    ):
+        results = ingest(source, since)
+
+    assert len(results) == 1
+    item = results[0]
+    assert item.source_id == "yt-source-1"
+    assert item.title == video_title
+    assert item.content_format == "video"
+    assert video_id in item.original_url
+    assert item.published_date == datetime(2026, 3, 24, 10, 0, 0, tzinfo=timezone.utc)
 
 ## Plan Context (language, framework, project structure)
 

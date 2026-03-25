@@ -19,7 +19,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 |------|-------------|----------|-------|--------|
 | B007 | Given a configured source list with RSS/web entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from RSS/web sources | US2.S1 | T014, T015, T019 | complete |
 | B008 | Given a configured source list with X (Twitter) entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from X sources | US2.S1 | T016, T019 | complete |
-| B009 | Given a configured source list with YouTube entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from YouTube sources | US2.S1 | T017, T019 | queued |
+| B009 | Given a configured source list with YouTube entries, when daily ingestion runs, new content published in the last 24 hours is retrieved from YouTube sources | US2.S1 | T017, T019 | complete |
 | B010 | Given a configured source list with podcast entries, when daily ingestion runs, new episodes published in the last 24 hours are retrieved from podcast feeds | US2.S1 | T018, T019 | queued |
 | B011 | Given a YouTube video published in the last 24 hours, the full transcript is available — retrieved via YouTube transcript first, with audio transcription as fallback | US2.S2 | T020, T032 | queued |
 | B012 | Given a podcast episode published in the last 24 hours, the episode audio is transcribed and full text is available for scoring | US2.S3 | T020, T033 | queued |

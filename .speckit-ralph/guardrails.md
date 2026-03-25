@@ -24,3 +24,8 @@
 - **Category**: RED-FAILURE
 - **Detail**: `patch("src.ingestion.handler.load_sources", ...)` raises `ModuleNotFoundError: No module named 'src'` when the project root isn't on `sys.path` and `src/__init__.py` doesn't exist. Fix: create `conftest.py` at repo root with `sys.path.insert(0, os.path.dirname(__file__))`, create empty `__init__.py` files for each package level, and create minimal stub modules for each patch target before writing the RED test.
 - **Added after**: B006 at 2026-03-25T02:04:10Z
+
+### Sign: pip shim broken for older Python, use python3 -m pip
+- **Category**: GREEN-FAILURE
+- **Detail**: `/usr/local/bin/pip` pointed to a removed Python 3.9 interpreter. Use `python3 -m pip install <pkg>` to target the active interpreter. Always install packages via `python3 -m pip` rather than bare `pip` in this environment.
+- **Added after**: B009 at 2026-03-25T02:58:00Z
