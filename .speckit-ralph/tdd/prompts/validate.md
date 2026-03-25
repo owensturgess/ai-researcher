@@ -41,98 +41,100 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_youtube_quota_limit.py
-# tests/unit/test_youtube_quota_limit.py
+# tests/unit/test_youtube_transcription_failure.py
+# tests/unit/test_youtube_transcription_failure.py
 import json
-import logging
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch, MagicMock
 
-from googleapiclient.errors import HttpError
+import boto3
+from moto import mock_aws
 
-from src.ingestion.sources.youtube import ingest
-from src.shared.models import Source
+from src.transcription.handler import handler
 
 
-def test_youtube_quota_exceeded_stops_queries_and_returns_partial_results(caplog):
+@mock_aws
+def test_youtube_no_transcript_and_transcription_failure_item_preserved_with_unavailable_flag(
+    monkeypatch,
+):
     """
-    Given a YouTube source where the first API page succeeds but a subsequent
-    query raises an HttpError with status 403 (quotaExceeded), when ingest()
-    is called, it returns the ContentItems already retrieved and does not raise
-    an exception — the caller (pipeline) can continue with other source types.
+    Given a YouTube video with no subtitles where both yt-dlp subtitle download
+    and audio transcription fail, when the handler processes the item, it returns
+    transcript_status='failed' and the ContentItem in S3 retains its title,
+    source_name, and original_url — the item is not dropped from the pipeline.
     """
-    source = Source(
-        id="yt-source-quota",
-        name="AI Channel",
-        type="youtube",
-        url="https://www.youtube.com/channel/UC_quota_test_channel",
-        category="ai",
-        active=True,
-        priority=1,
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item_id = "yt-item-no-transcript"
+    source_id = "yt-source-1"
+    video_url = "https://www.youtube.com/watch?v=noTranscriptVideoId"
+    item_title = "AI Summit Keynote: No Captions Available"
+    source_name = "AI Conference Channel"
+
+    # Write the raw ContentItem to S3
+    content_item = {
+        "id": item_id,
+        "title": item_title,
+        "source_id": source_id,
+        "source_name": source_name,
+        "published_date": "2026-03-24T10:00:00+00:00",
+        "full_text": "",
+        "original_url": video_url,
+        "content_format": "video",
+        "transcript_status": "pending",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{source_id}/{item_id}.json",
+        Body=json.dumps(content_item),
     )
-    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
 
-    # First page returns one video successfully
-    first_page_response = {
-        "items": [
+    # SQS event for the YouTube video
+    event = {
+        "Records": [
             {
-                "id": {"videoId": "video-before-quota"},
-                "snippet": {
-                    "title": "Video Retrieved Before Quota Hit",
-                    "publishedAt": "2026-03-24T08:00:00Z",
-                    "channelTitle": "AI Channel",
-                },
+                "body": json.dumps(
+                    {
+                        "item_id": item_id,
+                        "source_id": source_id,
+                        "content_format": "video",
+                        "original_url": video_url,
+                        "run_date": "2026-03-24",
+                    }
+                )
             }
-        ],
-        "nextPageToken": "page2token",
+        ]
     }
 
-    # Second page raises quota exceeded error (403 quotaExceeded)
-    quota_error_content = json.dumps({
-        "error": {
-            "code": 403,
-            "errors": [{"reason": "quotaExceeded", "domain": "youtube.quota"}],
-            "message": "The request cannot be completed because you have exceeded your quota.",
-        }
-    }).encode("utf-8")
-    mock_resp = MagicMock()
-    mock_resp.status = 403
-    quota_error = HttpError(resp=mock_resp, content=quota_error_content)
+    # yt-dlp raises an exception — no subtitles and audio extraction fails
+    mock_ydl_instance = MagicMock()
+    mock_ydl_instance.__enter__ = lambda s: s
+    mock_ydl_instance.__exit__ = MagicMock(return_value=False)
+    mock_ydl_instance.extract_info.side_effect = Exception(
+        "No subtitles available and audio download failed"
+    )
 
-    call_count = 0
+    mock_ydl_class = MagicMock(return_value=mock_ydl_instance)
 
-    def execute_side_effect():
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return first_page_response
-        raise quota_error
+    with patch("src.transcription.handler.yt_dlp.YoutubeDL", mock_ydl_class):
+        result = handler(event, None)
 
-    mock_list_request = MagicMock()
-    mock_list_request.execute.side_effect = execute_side_effect
+    # Handler must report transcript_status=failed — not raise or swallow the failure silently
+    assert result["transcript_status"] == "failed"
 
-    mock_search = MagicMock()
-    mock_search.list.return_value = mock_list_request
+    # The ContentItem in S3 must still preserve title, source_name, and original_url
+    updated_item_key = f"raw/2026-03-24/{source_id}/{item_id}.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=updated_item_key)
+    updated_item = json.loads(response["Body"].read())
 
-    mock_youtube_client = MagicMock()
-    mock_youtube_client.search.return_value = mock_search
-
-    with patch("src.ingestion.sources.youtube.build", return_value=mock_youtube_client):
-        with caplog.at_level(logging.WARNING):
-            results = ingest(source, since)
-
-    # Must return items collected before quota was hit — not raise or return nothing
-    assert isinstance(results, list)
-    assert len(results) >= 1
-    assert results[0].source_id == "yt-source-quota"
-    assert results[0].content_format == "video"
-
-    # Must log a quota-related warning so the operator knows queries stopped early
-    quota_logs = [
-        r for r in caplog.records
-        if "quota" in r.message.lower()
-    ]
-    assert len(quota_logs) >= 1
+    assert updated_item["title"] == item_title
+    assert updated_item["source_name"] == source_name
+    assert updated_item["original_url"] == video_url
+    # transcript_status must be 'failed' (the "transcript unavailable" flag)
+    assert updated_item["transcript_status"] == "failed"
 
 ## Public Interfaces (from interfaces.md)
 

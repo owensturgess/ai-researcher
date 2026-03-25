@@ -26,7 +26,7 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 | B013 | Given one source is temporarily unavailable (HTTP error, rate limit), the failure is logged, the source is skipped, and all other sources process normally | US2.S4 | T031 | complete |
 | B014 | When the X API rate limit is hit mid-ingestion, the system logs the event, processes already-retrieved sources, and continues with other source types | Edge Case | T028 | complete |
 | B015 | When the YouTube API quota approaches its daily limit, YouTube queries stop and the pipeline continues with other source types | Edge Case | T029 | complete |
-| B016 | When a YouTube video has no transcript and transcription fails, the item is included with a "transcript unavailable" flag; title, source, and link are still provided | Edge Case | T032 | queued |
+| B016 | When a YouTube video has no transcript and transcription fails, the item is included with a "transcript unavailable" flag; title, source, and link are still provided | Edge Case | T032 | complete |
 | B017 | When a podcast episode exceeds 2 hours and would exceed the daily transcription budget cap, it is flagged as "transcript unavailable" with the link still included | Edge Case | T033 | queued |
 | B018 | Sources are processed in priority order so highest-value sources are ingested first when rate limits constrain volume | FR-018 | T030 | queued |
 

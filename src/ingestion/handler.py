@@ -1,11 +1,14 @@
 # src/ingestion/handler.py
 import json
+import logging
 import os
 
 import boto3
 import yaml
 
 from src.ingestion.sources import rss, web, x_api
+
+logger = logging.getLogger(__name__)
 
 
 def load_sources():
@@ -45,7 +48,7 @@ def handler(event, context):
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:
-            pass
+            logger.warning("ingestion failed for source %s", source.get("id", "unknown"), exc_info=True)
 
     run_record = {
         "sources_attempted": sources_attempted,

@@ -35,7 +35,7 @@ import os
 import boto3
 import yaml
 
-from src.ingestion.sources import rss, web
+from src.ingestion.sources import rss, web, x_api
 
 
 def load_sources():
@@ -55,7 +55,7 @@ def handler(event, context):
     sources_succeeded = 0
     all_items = []
 
-    ingesters = {"rss": rss.ingest, "web": web.ingest}
+    ingesters = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
     for source in sources:
         source_type = source.get("type")
@@ -64,6 +64,14 @@ def handler(event, context):
             continue
         try:
             items = ingest_fn(source, since=None)
+            for i, item in enumerate(items):
+                item_key = f"raw/{run_date}/{source['id']}/{i}.json"
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=item_key,
+                    Body=json.dumps(item),
+                    ContentType="application/json",
+                )
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:
@@ -131,71 +139,118 @@ def ingest(source, since):
 
 --- src/ingestion/sources/x_api.py ---
 # src/ingestion/sources/x_api.py
+import logging
+
 import tweepy
 
 from src.shared.models import ContentItem
 
+logger = logging.getLogger(__name__)
+
 
 def ingest(source, since):
     client = tweepy.Client()
-    query = f"from:{source.url.rstrip('/').split('/')[-1]}"
-    start_time = since
-    response = client.search_recent_tweets(
-        query=query,
-        start_time=start_time,
-        tweet_fields=["created_at", "text"],
-    )
+    username = source.url.rstrip("/").split("/")[-1]
+    query = f"from:{username}"
     items = []
-    if not response.data:
-        return items
-    for tweet in response.data:
-        items.append(ContentItem(
-            id=str(tweet.id),
-            title=tweet.text,
-            source_id=source.id,
-            source_name=source.name,
-            published_date=tweet.created_at,
-            full_text=tweet.text,
-            original_url=f"https://twitter.com/i/web/status/{tweet.id}",
-        ))
+    next_token = None
+
+    while True:
+        kwargs = dict(
+            query=query,
+            start_time=since,
+            tweet_fields=["created_at", "text"],
+        )
+        if next_token:
+            kwargs["next_token"] = next_token
+
+        try:
+            response = client.search_recent_tweets(**kwargs)
+        except tweepy.errors.TooManyRequests:
+            logger.warning("rate limit hit mid-ingestion for source %s; returning partial results", source.id)
+            break
+
+        if response.data:
+            for tweet in response.data:
+                items.append(ContentItem(
+                    id=str(tweet.id),
+                    title=tweet.text,
+                    source_id=source.id,
+                    source_name=source.name,
+                    published_date=tweet.created_at,
+                    full_text=tweet.text,
+                    original_url=f"https://twitter.com/i/web/status/{tweet.id}",
+                ))
+
+        # next_token must be a real string to continue pagination
+        meta = getattr(response, "meta", None)
+        token = getattr(meta, "next_token", None) if meta is not None else None
+        if not isinstance(token, str) or not token:
+            break
+        next_token = token
+
     return items
 
 --- src/ingestion/sources/youtube.py ---
 # src/ingestion/sources/youtube.py
+import logging
 from datetime import datetime, timezone
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from src.shared.models import ContentItem
+
+logger = logging.getLogger(__name__)
 
 
 def ingest(source, since):
     channel_id = source.url.rstrip("/").split("/")[-1]
     youtube = build("youtube", "v3", developerKey=None)
-    request = youtube.search().list(
-        part="snippet",
-        channelId=channel_id,
-        publishedAfter=since.isoformat() if since else None,
-        type="video",
-        maxResults=50,
-    )
-    response = request.execute()
     items = []
-    for item in response.get("items", []):
-        video_id = item["id"]["videoId"]
-        snippet = item["snippet"]
-        published_at = snippet["publishedAt"]
-        published_date = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        items.append(ContentItem(
-            id=video_id,
-            title=snippet["title"],
-            source_id=source.id,
-            source_name=source.name,
-            published_date=published_date,
-            full_text="",
-            original_url=f"https://www.youtube.com/watch?v={video_id}",
-            content_format="video",
-        ))
+    page_token = None
+
+    while True:
+        kwargs = dict(
+            part="snippet",
+            channelId=channel_id,
+            publishedAfter=since.isoformat() if since else None,
+            type="video",
+            maxResults=50,
+        )
+        if page_token:
+            kwargs["pageToken"] = page_token
+
+        try:
+            response = youtube.search().list(**kwargs).execute()
+        except HttpError as e:
+            if e.resp.status == 403:
+                logger.warning(
+                    "YouTube quota exceeded for source %s; returning partial results", source.id
+                )
+                break
+            raise
+
+        for item in response.get("items", []):
+            video_id = item["id"]["videoId"]
+            snippet = item["snippet"]
+            published_at = snippet["publishedAt"]
+            published_date = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            items.append(ContentItem(
+                id=video_id,
+                title=snippet["title"],
+                source_id=source.id,
+                source_name=source.name,
+                published_date=published_date,
+                full_text="",
+                original_url=f"https://www.youtube.com/watch?v={video_id}",
+                content_format="video",
+            ))
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
     return items
 
 --- src/ingestion/sources/podcast.py ---
@@ -244,12 +299,36 @@ import boto3
 import yt_dlp
 
 
-def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
+def _upload_audio(s3, bucket, original_url, audio_key):
     with urllib.request.urlopen(original_url) as response:
         audio_bytes = response.read()
-
-    audio_key = f"audio/{run_date}/{item_id}.mp3"
     s3.put_object(Bucket=bucket, Key=audio_key, Body=audio_bytes)
+
+
+def _poll_transcription_job(transcribe, job_name):
+    while True:
+        resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
+        job = resp["TranscriptionJob"]
+        status = job["TranscriptionJobStatus"]
+        if status == "COMPLETED":
+            return job["Transcript"]["TranscriptFileUri"]
+        if status == "FAILED":
+            return None
+        time.sleep(5)
+
+
+def _fetch_transcript_text(s3, transcript_uri):
+    parsed = urllib.parse.urlparse(transcript_uri)
+    path_parts = parsed.path.lstrip("/").split("/", 1)
+    obj = s3.get_object(Bucket=path_parts[0], Key=path_parts[1])
+    transcript_data = json.loads(obj["Body"].read())
+    transcripts = transcript_data.get("results", {}).get("transcripts", [])
+    return transcripts[0]["transcript"] if transcripts else ""
+
+
+def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
+    audio_key = f"audio/{run_date}/{item_id}.mp3"
+    _upload_audio(s3, bucket, original_url, audio_key)
 
     transcribe = boto3.client("transcribe")
     job_name = f"transcribe-{run_date}-{item_id}".replace("/", "-")
@@ -262,26 +341,23 @@ def _transcribe_audio(s3, bucket, item_id, original_url, run_date):
         OutputKey=f"transcribe-output/{run_date}/{item_id}.json",
     )
 
-    while True:
-        resp = transcribe.get_transcription_job(TranscriptionJobName=job_name)
-        job = resp["TranscriptionJob"]
-        status = job["TranscriptionJobStatus"]
-        if status == "COMPLETED":
-            transcript_uri = job["Transcript"]["TranscriptFileUri"]
-            break
-        elif status == "FAILED":
-            return ""
-        time.sleep(5)
+    transcript_uri = _poll_transcription_job(transcribe, job_name)
+    if transcript_uri is None:
+        return ""
+    return _fetch_transcript_text(s3, transcript_uri)
 
-    parsed = urllib.parse.urlparse(transcript_uri)
-    path_parts = parsed.path.lstrip("/").split("/", 1)
-    transcript_bucket = path_parts[0]
-    transcript_key = path_parts[1]
 
-    obj = s3.get_object(Bucket=transcript_bucket, Key=transcript_key)
-    transcript_data = json.loads(obj["Body"].read())
-    transcripts = transcript_data.get("results", {}).get("transcripts", [])
-    return transcripts[0]["transcript"] if transcripts else ""
+def _extract_youtube_transcript(original_url):
+    ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(original_url, download=False)
+
+    requested = info.get("requested_subtitles") or {}
+    for sub in requested.values():
+        data = sub.get("data", "")
+        if data:
+            return data
+    return ""
 
 
 def handler(event: dict, context: object) -> dict:
@@ -291,7 +367,6 @@ def handler(event: dict, context: object) -> dict:
     for record in event["Records"]:
         body = json.loads(record["body"])
         item_id = body["item_id"]
-        source_id = body["source_id"]
         original_url = body["original_url"]
         run_date = body["run_date"]
         content_format = body.get("content_format", "video")
@@ -299,17 +374,7 @@ def handler(event: dict, context: object) -> dict:
         if content_format == "audio":
             transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
         else:
-            ydl_opts = {"writesubtitles": True, "subtitleslangs": ["en"], "skip_download": True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(original_url, download=False)
-
-            transcript_text = ""
-            requested = info.get("requested_subtitles") or {}
-            for lang, sub in requested.items():
-                data = sub.get("data", "")
-                if data:
-                    transcript_text = data
-                    break
+            transcript_text = _extract_youtube_transcript(original_url)
 
         s3.put_object(
             Bucket=bucket,
@@ -352,6 +417,185 @@ class ContentItem:
 
 ## Current Tests
 
+
+--- tests/unit/test_youtube_quota_limit.py ---
+# tests/unit/test_youtube_quota_limit.py
+import json
+import logging
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+from googleapiclient.errors import HttpError
+
+from src.ingestion.sources.youtube import ingest
+from src.shared.models import Source
+
+
+def test_youtube_quota_exceeded_stops_queries_and_returns_partial_results(caplog):
+    """
+    Given a YouTube source where the first API page succeeds but a subsequent
+    query raises an HttpError with status 403 (quotaExceeded), when ingest()
+    is called, it returns the ContentItems already retrieved and does not raise
+    an exception — the caller (pipeline) can continue with other source types.
+    """
+    source = Source(
+        id="yt-source-quota",
+        name="AI Channel",
+        type="youtube",
+        url="https://www.youtube.com/channel/UC_quota_test_channel",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    # First page returns one video successfully
+    first_page_response = {
+        "items": [
+            {
+                "id": {"videoId": "video-before-quota"},
+                "snippet": {
+                    "title": "Video Retrieved Before Quota Hit",
+                    "publishedAt": "2026-03-24T08:00:00Z",
+                    "channelTitle": "AI Channel",
+                },
+            }
+        ],
+        "nextPageToken": "page2token",
+    }
+
+    # Second page raises quota exceeded error (403 quotaExceeded)
+    quota_error_content = json.dumps({
+        "error": {
+            "code": 403,
+            "errors": [{"reason": "quotaExceeded", "domain": "youtube.quota"}],
+            "message": "The request cannot be completed because you have exceeded your quota.",
+        }
+    }).encode("utf-8")
+    mock_resp = MagicMock()
+    mock_resp.status = 403
+    quota_error = HttpError(resp=mock_resp, content=quota_error_content)
+
+    call_count = 0
+
+    def execute_side_effect():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return first_page_response
+        raise quota_error
+
+    mock_list_request = MagicMock()
+    mock_list_request.execute.side_effect = execute_side_effect
+
+    mock_search = MagicMock()
+    mock_search.list.return_value = mock_list_request
+
+    mock_youtube_client = MagicMock()
+    mock_youtube_client.search.return_value = mock_search
+
+    with patch("src.ingestion.sources.youtube.build", return_value=mock_youtube_client):
+        with caplog.at_level(logging.WARNING):
+            results = ingest(source, since)
+
+    # Must return items collected before quota was hit — not raise or return nothing
+    assert isinstance(results, list)
+    assert len(results) >= 1
+    assert results[0].source_id == "yt-source-quota"
+    assert results[0].content_format == "video"
+
+    # Must log a quota-related warning so the operator knows queries stopped early
+    quota_logs = [
+        r for r in caplog.records
+        if "quota" in r.message.lower()
+    ]
+    assert len(quota_logs) >= 1
+
+--- tests/unit/test_ingestion_error_isolation.py ---
+# tests/unit/test_ingestion_error_isolation.py
+import textwrap
+from urllib.error import HTTPError
+from unittest.mock import patch, MagicMock
+
+import boto3
+from moto import mock_aws
+
+from src.ingestion.handler import handler
+
+
+@mock_aws
+def test_failing_source_is_skipped_and_other_sources_process_normally(
+    monkeypatch, tmp_path
+):
+    """
+    Given two RSS sources where one raises an HTTP 429 (rate limit) during
+    ingestion, when the handler runs, the failing source is skipped and the
+    other source's items are ingested normally — sources_attempted == 2 and
+    sources_succeeded == 1 in the returned counts.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-rss-failing
+            name: Failing Feed
+            type: rss
+            url: https://failing.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-rss-ok
+            name: Healthy Feed
+            type: rss
+            url: https://healthy.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
+
+    # Healthy feed returns one recent entry
+    fake_healthy_feed = MagicMock()
+    fake_healthy_feed.bozo = False
+    fake_healthy_feed.entries = [
+        MagicMock(
+            title="AI Update from Healthy Source",
+            link="https://healthy.example.com/article-1",
+            published_parsed=(2026, 3, 24, 10, 0, 0, 0, 0, 0),
+            summary="A healthy AI update.",
+        )
+    ]
+
+    # feedparser.parse raises HTTPError for the failing source URL
+    def parse_side_effect(url, *args, **kwargs):
+        if "failing" in url:
+            raise HTTPError(url, 429, "Too Many Requests", {}, None)
+        return fake_healthy_feed
+
+    with patch("feedparser.parse", side_effect=parse_side_effect):
+        result = handler({}, None)
+
+    # Both sources were attempted; only the healthy one succeeded
+    assert result["sources_attempted"] == 2
+    assert result["sources_succeeded"] == 1
+
+    # Items from the healthy source were written to S3 despite the other failure
+    objects = s3.list_objects_v2(
+        Bucket="test-pipeline-bucket", Prefix="raw/2026-03-24/src-rss-ok/"
+    )
+    assert objects.get("KeyCount", 0) >= 1
 
 --- tests/unit/test_youtube_transcription.py ---
 # tests/unit/test_youtube_transcription.py
@@ -718,6 +962,80 @@ def test_youtube_ingestion_returns_video_content_items_for_recent_videos():
     assert item.content_format == "video"
     assert video_id in item.original_url
     assert item.published_date == datetime(2026, 3, 24, 10, 0, 0, tzinfo=timezone.utc)
+
+--- tests/unit/test_x_api_rate_limit_mid_ingestion.py ---
+# tests/unit/test_x_api_rate_limit_mid_ingestion.py
+import logging
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import tweepy
+
+from src.ingestion.sources.x_api import ingest
+from src.shared.models import Source
+
+
+def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(caplog):
+    """
+    Given an X source being ingested across multiple pages, when the X API
+    raises TooManyRequests on the second page (rate limit hit mid-ingestion),
+    ingest() returns the ContentItems already retrieved from the first page
+    and emits a warning log containing "rate limit".
+    """
+    source = Source(
+        id="x-source-1",
+        name="Test X Account",
+        type="x",
+        url="https://twitter.com/testaccount",
+        category="ai",
+        active=True,
+        priority=1,
+    )
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+
+    # First page: one tweet retrieved successfully, meta indicates more pages exist
+    mock_tweet = MagicMock()
+    mock_tweet.id = "tweet-page1-001"
+    mock_tweet.text = "First page tweet about AI developments"
+    mock_tweet.created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
+
+    first_page_meta = MagicMock()
+    first_page_meta.next_token = "page2_token"
+
+    first_page_response = MagicMock()
+    first_page_response.data = [mock_tweet]
+    first_page_response.meta = first_page_meta
+
+    # Construct a tweepy TooManyRequests exception for the second page
+    mock_rate_limit_response = MagicMock()
+    mock_rate_limit_response.status_code = 429
+    mock_rate_limit_response.headers = {}
+    mock_rate_limit_response.json.return_value = {}
+    mock_rate_limit_response.text = "Too Many Requests"
+
+    call_count = 0
+
+    def search_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return first_page_response
+        raise tweepy.errors.TooManyRequests(mock_rate_limit_response)
+
+    mock_client = MagicMock()
+    mock_client.search_recent_tweets.side_effect = search_side_effect
+
+    with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client):
+        with caplog.at_level(logging.WARNING):
+            results = ingest(source, since)
+
+    # Items from the first page must be returned despite the rate limit
+    assert len(results) == 1
+    assert results[0].source_id == "x-source-1"
+
+    # A rate-limit-specific warning must be logged
+    rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
+    assert len(rate_limit_logs) >= 1
 
 --- tests/unit/test_podcast_transcription.py ---
 # tests/unit/test_podcast_transcription.py
