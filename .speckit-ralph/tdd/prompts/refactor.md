@@ -53,7 +53,7 @@ def load_sources(config_path):
             active=s.get("active", True),
             priority=s.get("priority", 1),
         )
-        for s in config.get("sources", [])
+        for s in raw
         if s.get("active", True)
     ]
 
@@ -488,6 +488,19 @@ class ContentItem:
     content_format: str = "text"  # text / audio / video
     transcript_status: str = "not_needed"  # pending / completed / failed / not_needed
 
+
+@dataclass
+class ScoredItem:
+    content_item_id: str
+    relevance_score: int
+    urgency: str
+    relevance_tag: str
+    executive_summary: str
+    scoring_reasoning: str
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None
+    also_reported_by: list = field(default_factory=list)
+
 --- src/briefing/handler.py ---
 # src/briefing/handler.py
 import json
@@ -594,6 +607,55 @@ def handler(event, context):
                 items_above_threshold += 1
 
     return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
+
+--- src/scoring/deduplication.py ---
+# src/scoring/deduplication.py
+import json
+
+import boto3
+
+
+def _are_duplicates(bedrock, item_a, item_b):
+    prompt = (
+        f"Item A summary: {item_a.executive_summary}\n"
+        f"Item A reasoning: {item_a.scoring_reasoning}\n"
+        f"Item B summary: {item_b.executive_summary}\n"
+        f"Item B reasoning: {item_b.scoring_reasoning}\n\n"
+        "Do these items cover the same core development? "
+        "Respond with JSON: {\"is_duplicate\": true} or {\"is_duplicate\": false}."
+    )
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 64,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+    })
+    response = bedrock.invoke_model(
+        modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        body=body,
+        contentType="application/json",
+        accept="application/json",
+    )
+    text = json.loads(response["body"].read())["content"][0]["text"]
+    return json.loads(text).get("is_duplicate", False)
+
+
+def deduplicate_by_semantics(scored_items):
+    bedrock = boto3.client("bedrock-runtime")
+    items = sorted(scored_items, key=lambda x: x.relevance_score, reverse=True)
+
+    for i in range(len(items)):
+        if items[i].is_duplicate:
+            continue
+        for j in range(i + 1, len(items)):
+            if items[j].is_duplicate:
+                continue
+            if _are_duplicates(bedrock, items[i], items[j]):
+                items[j].is_duplicate = True
+                items[j].duplicate_of = items[i].content_item_id
+                items[i].also_reported_by.append(items[j].content_item_id)
+
+    return items
 
 ## Current Tests
 
@@ -951,6 +1013,91 @@ def test_removed_source_id_is_absent_from_run_record_source_id_list(
     )
     assert "src-removed-002" not in source_ids, (
         f"src-removed-002 must not appear in source_ids_attempted after removal, got: {source_ids}"
+    )
+
+--- tests/unit/test_semantic_deduplication.py ---
+# tests/unit/test_semantic_deduplication.py
+#
+# Behavior B028: Given two content items from different sources cover the same
+# development, only the highest-relevance version appears in the briefing.
+#
+# Tests the public interface deduplicate_by_semantics(scored_items) in
+# src/scoring/deduplication.py. When two ScoredItems cover the same core
+# development, the lower-relevance item must be flagged with is_duplicate=True
+# and duplicate_of pointing to the higher-relevance item's content_item_id.
+import json
+from unittest.mock import MagicMock, patch
+
+from src.scoring.deduplication import deduplicate_by_semantics
+from src.shared.models import ScoredItem
+
+
+def test_lower_relevance_item_flagged_as_duplicate_when_two_sources_cover_same_development():
+    """
+    Given two ScoredItems from different sources covering the same Claude 4
+    release (score 85 and score 60), when deduplicate_by_semantics() runs,
+    the lower-relevance item has is_duplicate=True and duplicate_of set to
+    the higher-relevance item's content_item_id, while the higher-relevance
+    item remains is_duplicate=False.
+    """
+    item_primary = ScoredItem(
+        content_item_id="item-claude4-techcrunch",
+        relevance_score=85,
+        urgency="worth_discussing",
+        relevance_tag="AI Tools",
+        executive_summary=(
+            "Anthropic releases Claude 4 with major agentic software development "
+            "capabilities, enabling autonomous multi-step coding workflows."
+        ),
+        scoring_reasoning="Directly relevant to agentic SDLC transformation goals.",
+        is_duplicate=False,
+        duplicate_of=None,
+    )
+
+    item_duplicate = ScoredItem(
+        content_item_id="item-claude4-verge",
+        relevance_score=60,
+        urgency="informational",
+        relevance_tag="AI Tools",
+        executive_summary=(
+            "Claude 4 AI assistant launched by Anthropic with new coding and "
+            "agentic features announced today."
+        ),
+        scoring_reasoning="Same Claude 4 release covered from a consumer angle.",
+        is_duplicate=False,
+        duplicate_of=None,
+    )
+
+    # Mock Bedrock at the AWS service boundary — LLM identifies the pair as duplicates
+    # and nominates item-claude4-techcrunch (higher score) as the primary version.
+    llm_response = json.dumps({"is_duplicate": True})
+    mock_stream = MagicMock()
+    mock_stream.read.return_value = json.dumps(
+        {"content": [{"text": llm_response}]}
+    ).encode("utf-8")
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.return_value = {"body": mock_stream}
+
+    with patch("src.scoring.deduplication.boto3.client", return_value=mock_bedrock):
+        result = deduplicate_by_semantics([item_primary, item_duplicate])
+
+    by_id = {item.content_item_id: item for item in result}
+
+    # Higher-relevance item must remain primary — not flagged as duplicate
+    assert by_id["item-claude4-techcrunch"].is_duplicate is False, (
+        "The highest-relevance item must not be flagged as a duplicate."
+    )
+    assert by_id["item-claude4-techcrunch"].duplicate_of is None
+
+    # Lower-relevance item must be flagged as a duplicate of the primary
+    assert by_id["item-claude4-verge"].is_duplicate is True, (
+        "The lower-relevance item covering the same development must be flagged "
+        "is_duplicate=True so it is excluded from the briefing."
+    )
+    assert by_id["item-claude4-verge"].duplicate_of == "item-claude4-techcrunch", (
+        f"duplicate_of must point to the primary item id, "
+        f"got: {by_id['item-claude4-verge'].duplicate_of!r}"
     )
 
 --- tests/unit/test_scoring_reliability.py ---
@@ -2013,6 +2160,166 @@ def test_new_source_entry_in_config_file_is_included_in_loaded_sources(tmp_path)
     assert new_source.url == "https://new-source.example.com/articles"
     assert new_source.category == "research"
 
+--- tests/unit/test_deduplication_five_sources.py ---
+# tests/unit/test_deduplication_five_sources.py
+#
+# Behavior B030: When the same development is announced across 5+ sources,
+# the deduplication step selects the single best representative item, with
+# other source links optionally listed as "also reported by".
+#
+# Tests the public interface deduplicate_by_semantics(scored_items) in
+# src/scoring/deduplication.py. When 5 ScoredItems all cover the same core
+# development, the highest-relevance item must be retained as primary and all
+# four others flagged as duplicates. The primary item must expose an
+# also_reported_by attribute listing the content_item_ids of the other
+# sources — enabling the briefing template to surface "also covered by 4
+# other sources" without cluttering the main item list.
+#
+# This test fails (RED) because ScoredItem has no also_reported_by field and
+# deduplicate_by_semantics does not populate it.
+import json
+from unittest.mock import MagicMock, patch
+
+from src.scoring.deduplication import deduplicate_by_semantics
+from src.shared.models import ScoredItem
+
+
+def test_five_sources_same_development_best_item_retained_with_also_reported_by():
+    """
+    Given five ScoredItems from different sources all covering the same GPT-5
+    release (scores 90, 75, 65, 55, 45), when deduplicate_by_semantics() runs:
+
+    1. Exactly one item has is_duplicate=False (the score-90 primary).
+    2. All four remaining items have is_duplicate=True and duplicate_of equal
+       to the primary item's content_item_id.
+    3. The primary item has an also_reported_by attribute that is a list
+       containing the content_item_ids of all four duplicate items — so the
+       briefing renderer can append "also reported by: source-b, source-c, …"
+       without re-querying the full scored list.
+    """
+    items = [
+        ScoredItem(
+            content_item_id="item-gpt5-source-a",
+            relevance_score=90,
+            urgency="action_needed",
+            relevance_tag="Competitive Intelligence",
+            executive_summary=(
+                "OpenAI releases GPT-5 with reasoning and agentic capabilities "
+                "that set a new industry benchmark for AI-assisted software development."
+            ),
+            scoring_reasoning="Primary source with deepest technical analysis.",
+            is_duplicate=False,
+            duplicate_of=None,
+        ),
+        ScoredItem(
+            content_item_id="item-gpt5-source-b",
+            relevance_score=75,
+            urgency="worth_discussing",
+            relevance_tag="Competitive Intelligence",
+            executive_summary=(
+                "GPT-5 announced by OpenAI; industry observers note significant "
+                "improvements over GPT-4 in coding benchmarks."
+            ),
+            scoring_reasoning="Same GPT-5 release from a different outlet.",
+            is_duplicate=False,
+            duplicate_of=None,
+        ),
+        ScoredItem(
+            content_item_id="item-gpt5-source-c",
+            relevance_score=65,
+            urgency="worth_discussing",
+            relevance_tag="Competitive Intelligence",
+            executive_summary=(
+                "OpenAI's GPT-5 model launched today with multimodal and agentic features."
+            ),
+            scoring_reasoning="Same release, shorter coverage.",
+            is_duplicate=False,
+            duplicate_of=None,
+        ),
+        ScoredItem(
+            content_item_id="item-gpt5-source-d",
+            relevance_score=55,
+            urgency="informational",
+            relevance_tag="AI Tools",
+            executive_summary=(
+                "GPT-5 is here: OpenAI drops its most powerful model yet."
+            ),
+            scoring_reasoning="Consumer-angle reporting on the same release.",
+            is_duplicate=False,
+            duplicate_of=None,
+        ),
+        ScoredItem(
+            content_item_id="item-gpt5-source-e",
+            relevance_score=45,
+            urgency="informational",
+            relevance_tag="AI Tools",
+            executive_summary=(
+                "OpenAI announces GPT-5 availability for ChatGPT Plus users."
+            ),
+            scoring_reasoning="Brief product-availability notice for the same release.",
+            is_duplicate=False,
+            duplicate_of=None,
+        ),
+    ]
+
+    # All five items cover the same GPT-5 release — LLM returns is_duplicate=true
+    # for every pairwise comparison initiated by the implementation.
+    def invoke_model_side_effect(modelId, body, **kwargs):
+        mock_stream = MagicMock()
+        mock_stream.read.return_value = json.dumps(
+            {"content": [{"text": json.dumps({"is_duplicate": True})}]}
+        ).encode("utf-8")
+        return {"body": mock_stream}
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.side_effect = invoke_model_side_effect
+
+    with patch("src.scoring.deduplication.boto3.client", return_value=mock_bedrock):
+        result = deduplicate_by_semantics(items)
+
+    by_id = {item.content_item_id: item for item in result}
+
+    # --- Assertion 1: exactly one non-duplicate (the highest-scoring primary) ---
+    non_duplicates = [item for item in result if not item.is_duplicate]
+    assert len(non_duplicates) == 1, (
+        f"Expected exactly 1 non-duplicate item, got {len(non_duplicates)}: "
+        f"{[i.content_item_id for i in non_duplicates]}"
+    )
+    primary = non_duplicates[0]
+    assert primary.content_item_id == "item-gpt5-source-a", (
+        f"The highest-relevance item (score 90) must be the primary; "
+        f"got: {primary.content_item_id}"
+    )
+
+    # --- Assertion 2: all four remaining items flagged as duplicates of the primary ---
+    duplicate_ids = {"item-gpt5-source-b", "item-gpt5-source-c",
+                     "item-gpt5-source-d", "item-gpt5-source-e"}
+    for item_id in duplicate_ids:
+        item = by_id[item_id]
+        assert item.is_duplicate is True, (
+            f"{item_id} must be flagged is_duplicate=True when 5 sources cover "
+            "the same development and it is not the highest-relevance item."
+        )
+        assert item.duplicate_of == "item-gpt5-source-a", (
+            f"{item_id}.duplicate_of must point to the primary item "
+            f"'item-gpt5-source-a', got: {item.duplicate_of!r}"
+        )
+
+    # --- Assertion 3: primary item exposes also_reported_by list of duplicate IDs ---
+    # This will FAIL (RED) because ScoredItem has no also_reported_by field and
+    # deduplicate_by_semantics does not populate it.
+    assert hasattr(primary, "also_reported_by"), (
+        "The primary ScoredItem must have an 'also_reported_by' attribute so that "
+        "the briefing renderer can append 'also reported by: …' without re-scanning "
+        "the full scored list. Add also_reported_by to ScoredItem and populate it "
+        "in deduplicate_by_semantics()."
+    )
+    also_reported = set(primary.also_reported_by)
+    assert also_reported == duplicate_ids, (
+        f"primary.also_reported_by must contain the ids of all 4 duplicate items. "
+        f"Expected: {duplicate_ids}, got: {also_reported}"
+    )
+
 --- tests/unit/test_youtube_transcription_failure.py ---
 # tests/unit/test_youtube_transcription_failure.py
 import json
@@ -2198,6 +2505,123 @@ def test_scored_item_above_threshold_is_classified_with_valid_urgency_level(
     )
     assert scored["urgency"] == "action_needed", (
         f"Expected 'action_needed' from LLM response, got '{scored['urgency']}'"
+    )
+
+--- tests/unit/test_semantic_deduplication_different_angles.py ---
+# tests/unit/test_semantic_deduplication_different_angles.py
+#
+# Behavior B029: Given two items have similar topics but genuinely different
+# angles or insights, both items are retained as distinct entries.
+#
+# The current _are_duplicates prompt sends only executive_summary to the LLM.
+# Without scoring_reasoning, the LLM lacks context to distinguish "same core
+# development reported twice" from "same topic covered from a genuinely
+# different angle." This test will FAIL (RED) until scoring_reasoning is
+# included in the deduplication prompt, enabling proper angle differentiation.
+
+import json
+from unittest.mock import MagicMock, patch
+
+from src.scoring.deduplication import deduplicate_by_semantics
+from src.shared.models import ScoredItem
+
+
+def test_items_with_different_angle_reasoning_are_both_retained_when_reasoning_informs_dedup():
+    """
+    Given two ScoredItems with similar executive_summaries (same GPT-5 release)
+    but scoring_reasoning that explicitly documents different angles — one scored
+    from a developer-tools perspective, one from a business-strategy perspective —
+    when deduplicate_by_semantics() is called, both items are retained as distinct
+    entries (is_duplicate=False, duplicate_of=None for both).
+
+    The Bedrock mock returns is_duplicate=false ONLY when the prompt contains
+    the scoring_reasoning text, simulating a real LLM that correctly identifies
+    different angles once given full context. With the current implementation
+    (prompt contains only executive_summary), the mock returns is_duplicate=true
+    and the test FAILS — confirming that scoring_reasoning must be included in
+    the deduplication prompt to detect genuinely different angles.
+    """
+    item_developer = ScoredItem(
+        content_item_id="item-gpt5-developer-tools",
+        relevance_score=85,
+        urgency="worth_discussing",
+        relevance_tag="AI Tools",
+        executive_summary=(
+            "OpenAI releases GPT-5 with advanced coding and agentic capabilities, "
+            "signalling a major shift in AI-assisted development workflows."
+        ),
+        scoring_reasoning=(
+            "Scored from a developer-tools angle: GPT-5 directly competes with our "
+            "agentic SDLC toolchain choices and may alter which LLM we recommend "
+            "for code generation tasks."
+        ),
+        is_duplicate=False,
+        duplicate_of=None,
+    )
+
+    item_business = ScoredItem(
+        content_item_id="item-gpt5-business-strategy",
+        relevance_score=70,
+        urgency="worth_discussing",
+        relevance_tag="Market Intelligence",
+        executive_summary=(
+            "GPT-5 launched by OpenAI; analysts expect significant market impact "
+            "across enterprise AI adoption."
+        ),
+        scoring_reasoning=(
+            "Scored from a business-strategy angle: this launch reshapes the "
+            "competitive landscape for enterprise AI adoption and may influence "
+            "budget allocation decisions for agentic SDLC initiatives."
+        ),
+        is_duplicate=False,
+        duplicate_of=None,
+    )
+
+    # Bedrock mock: returns is_duplicate=false only when scoring_reasoning text
+    # is present in the prompt — simulating a well-informed LLM that recognises
+    # the developer-tools and business-strategy angles as genuinely distinct.
+    # Without reasoning in the prompt the mock returns is_duplicate=true, which
+    # causes the test to fail (RED) for the current implementation.
+    def invoke_model_side_effect(modelId, body, **kwargs):
+        request = json.loads(body)
+        prompt_text = ""
+        for msg in request.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                prompt_text += content
+
+        reasoning_present = (
+            "developer-tools angle" in prompt_text
+            or "business-strategy angle" in prompt_text
+        )
+        result = {"is_duplicate": not reasoning_present}
+
+        mock_stream = MagicMock()
+        mock_stream.read.return_value = json.dumps(
+            {"content": [{"text": json.dumps(result)}]}
+        ).encode("utf-8")
+        return {"body": mock_stream}
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.side_effect = invoke_model_side_effect
+
+    with patch("src.scoring.deduplication.boto3.client", return_value=mock_bedrock):
+        result = deduplicate_by_semantics([item_developer, item_business])
+
+    by_id = {item.content_item_id: item for item in result}
+
+    # Both items must be retained as distinct entries — neither flagged as duplicate
+    assert by_id["item-gpt5-developer-tools"].is_duplicate is False, (
+        "The developer-tools-angle item must not be flagged as a duplicate."
+    )
+    assert by_id["item-gpt5-business-strategy"].is_duplicate is False, (
+        "The business-strategy-angle item must not be flagged as a duplicate — "
+        "it covers the same topic as the other item but from a genuinely different "
+        "angle. The dedup prompt must include scoring_reasoning so the LLM can "
+        "distinguish angle coverage from same-development duplication."
+    )
+    assert by_id["item-gpt5-business-strategy"].duplicate_of is None, (
+        "duplicate_of must be None for an item retained as a distinct entry."
     )
 
 --- tests/unit/test_seed_source_list.py ---
@@ -2653,6 +3077,12 @@ The constitution contains only template placeholders with no specific principles
 - **Category**: RED-FAILURE
 - **Detail**: The source-removal behavior (B024 Behavior A) is already covered by the existing `handler.py` implementation: `load_sources()` reads only from the active `SOURCES_CONFIG` file, so any source absent from YAML is never attempted. The corrected single-assertion RED test (`sources_attempted == 1`, no S3 keys under `src-removed-002/`, at least one key under `src-remaining-001/`) passes immediately without new implementation. When a behavior is already implemented by prior GREEN phases, the RED test will be green from the start — treat this as "behavior pre-implemented" and advance directly to VALIDATE.
 - **Added after**: B024 at 2026-03-25T04:22:49Z
+
+
+### Sign: B029 behavior pre-implemented — RED phase produces GREEN test
+- **Category**: RED-FAILURE
+- **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
+- **Added after**: B029 at 2026-03-25T04:38:24Z
 
 ## Output Format
 

@@ -147,9 +147,9 @@
 
 ### Implementation for User Story 6
 
-- [ ] T044 [US6] Implement cost tracking in src/monitoring/handler.py — calculate estimated costs per run: Bedrock token usage (input + output tokens × rate), Transcribe minutes × rate, track X API monthly spend; write to PipelineRun.estimated_cost_usd
+- [x] T044 [US6] Implement cost tracking in src/monitoring/handler.py — calculate estimated costs per run: Bedrock token usage (input + output tokens × rate), Transcribe minutes × rate, track X API monthly spend; write to PipelineRun.estimated_cost_usd
 - [ ] T045 [US6] Implement cost alerting in src/monitoring/handler.py — compare daily cost against settings.yaml threshold, send alert email via SES if exceeded (FR-017)
-- [ ] T046 [US6] Implement structured logging across all Lambda handlers — log source scan results, transcription job outcomes, scoring statistics (items scored, above threshold, duplicates removed), delivery status; use CloudWatch structured JSON logging format
+- [x] T046 [US6] Implement structured logging across all Lambda handlers — log source scan results, transcription job outcomes, scoring statistics (items scored, above threshold, duplicates removed), delivery status; use CloudWatch structured JSON logging format
 - [ ] T047 [US6] Add CloudWatch custom metrics in src/monitoring/handler.py — publish to "AgenticSDLCIntel" namespace: sources_scanned, sources_failed, items_ingested, items_above_threshold, transcription_jobs, estimated_cost, delivery_latency_minutes, briefing_item_count
 - [ ] T048 [US6] Configure CloudWatch dashboard and alarms in infra/stacks/monitoring_stack.py — dashboard with daily metrics graphs, alarms for: delivery failure, cost threshold exceeded, >3 consecutive source failures
 

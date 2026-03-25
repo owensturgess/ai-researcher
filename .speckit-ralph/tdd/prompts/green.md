@@ -40,18 +40,17 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails at the right point — assertions 1 and 2 pass (the existing implementation correctly selects the primary and flags all 4 duplicates), but assertion 3 fails because `ScoredItem` has no `also_reported_by` field.
+Test fails cleanly at the stub's `NotImplementedError`.
 
 ```
-FILE: tests/unit/test_deduplication_five_sources.py
+FILE: tests/unit/test_pipeline_completion_logging.py
 ```
 
-**What the test covers**: When 5 items cover the same development, `deduplicate_by_semantics()` must:
-1. ✅ Keep only the highest-scoring item as non-duplicate (passes with current impl)
-2. ✅ Flag all 4 others with `is_duplicate=True` and correct `duplicate_of` (passes with current impl)
-3. ❌ Set `primary.also_reported_by` to a list of the 4 duplicate IDs (fails — new behavior)
+The test fails with `NotImplementedError: monitoring handler not yet implemented` — confirming RED. The test:
 
-**To go GREEN**: Add `also_reported_by: list = field(default_factory=list)` to `ScoredItem` in `models.py`, and populate it inside `deduplicate_by_semantics()` when flagging duplicates.
+- Writes a `PipelineRun` record to S3 with known values (11 sources, 47 items, 8 above threshold, 3 transcription jobs, $2.47 cost)
+- Calls `monitoring.handler.handler()` with mocked CloudWatch and SES at AWS boundaries
+- Asserts that each of the five required metric values appears in the captured log output
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -528,6 +527,7 @@ class ScoredItem:
     scoring_reasoning: str
     is_duplicate: bool = False
     duplicate_of: Optional[str] = None
+    also_reported_by: list = field(default_factory=list)
 
 --- src/briefing/handler.py ---
 # src/briefing/handler.py
@@ -681,8 +681,18 @@ def deduplicate_by_semantics(scored_items):
             if _are_duplicates(bedrock, items[i], items[j]):
                 items[j].is_duplicate = True
                 items[j].duplicate_of = items[i].content_item_id
+                items[i].also_reported_by.append(items[j].content_item_id)
 
     return items
+
+--- src/monitoring/handler.py ---
+# src/monitoring/handler.py
+# Stub — implementation pending (B031 GREEN phase)
+import boto3
+
+
+def handler(event: dict, context: object) -> dict:
+    raise NotImplementedError("monitoring handler not yet implemented")
 
 ## Plan Context (language, framework, project structure)
 

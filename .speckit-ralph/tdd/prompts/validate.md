@@ -41,164 +41,121 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_deduplication_five_sources.py
-# tests/unit/test_deduplication_five_sources.py
+# tests/unit/test_pipeline_completion_logging.py
+# tests/unit/test_pipeline_completion_logging.py
 #
-# Behavior B030: When the same development is announced across 5+ sources,
-# the deduplication step selects the single best representative item, with
-# other source links optionally listed as "also reported by".
+# Behavior B031: When the daily pipeline completes, logs show: sources scanned,
+# items ingested, items scored above threshold, transcription jobs run, and
+# total estimated cost.
 #
-# Tests the public interface deduplicate_by_semantics(scored_items) in
-# src/scoring/deduplication.py. When 5 ScoredItems all cover the same core
-# development, the highest-relevance item must be retained as primary and all
-# four others flagged as duplicates. The primary item must expose an
-# also_reported_by attribute listing the content_item_ids of the other
-# sources — enabling the briefing template to surface "also covered by 4
-# other sources" without cluttering the main item list.
-#
-# This test fails (RED) because ScoredItem has no also_reported_by field and
-# deduplicate_by_semantics does not populate it.
+# Tests the public interface handler(event, context) in src/monitoring/handler.py.
+# After a completed pipeline run record exists in S3, the monitoring handler must
+# emit a log entry containing all five required pipeline completion metrics.
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
-from src.scoring.deduplication import deduplicate_by_semantics
-from src.shared.models import ScoredItem
+import boto3
+from moto import mock_aws
+
+from src.monitoring.handler import handler
 
 
-def test_five_sources_same_development_best_item_retained_with_also_reported_by():
+@mock_aws
+def test_pipeline_completion_logs_sources_items_scored_transcriptions_and_cost(
+    monkeypatch, caplog
+):
     """
-    Given five ScoredItems from different sources all covering the same GPT-5
-    release (scores 90, 75, 65, 55, 45), when deduplicate_by_semantics() runs:
-
-    1. Exactly one item has is_duplicate=False (the score-90 primary).
-    2. All four remaining items have is_duplicate=True and duplicate_of equal
-       to the primary item's content_item_id.
-    3. The primary item has an also_reported_by attribute that is a list
-       containing the content_item_ids of all four duplicate items — so the
-       briefing renderer can append "also reported by: source-b, source-c, …"
-       without re-querying the full scored list.
+    Given a completed PipelineRun record in S3 with known metrics (11 sources
+    scanned, 47 items ingested, 8 items above threshold, 3 transcription jobs,
+    $2.47 estimated cost), when the monitoring handler runs, the log output
+    contains all five values — confirming operators can verify pipeline health
+    from logs alone without consulting the S3 run record directly.
     """
-    items = [
-        ScoredItem(
-            content_item_id="item-gpt5-source-a",
-            relevance_score=90,
-            urgency="action_needed",
-            relevance_tag="Competitive Intelligence",
-            executive_summary=(
-                "OpenAI releases GPT-5 with reasoning and agentic capabilities "
-                "that set a new industry benchmark for AI-assisted software development."
-            ),
-            scoring_reasoning="Primary source with deepest technical analysis.",
-            is_duplicate=False,
-            duplicate_of=None,
-        ),
-        ScoredItem(
-            content_item_id="item-gpt5-source-b",
-            relevance_score=75,
-            urgency="worth_discussing",
-            relevance_tag="Competitive Intelligence",
-            executive_summary=(
-                "GPT-5 announced by OpenAI; industry observers note significant "
-                "improvements over GPT-4 in coding benchmarks."
-            ),
-            scoring_reasoning="Same GPT-5 release from a different outlet.",
-            is_duplicate=False,
-            duplicate_of=None,
-        ),
-        ScoredItem(
-            content_item_id="item-gpt5-source-c",
-            relevance_score=65,
-            urgency="worth_discussing",
-            relevance_tag="Competitive Intelligence",
-            executive_summary=(
-                "OpenAI's GPT-5 model launched today with multimodal and agentic features."
-            ),
-            scoring_reasoning="Same release, shorter coverage.",
-            is_duplicate=False,
-            duplicate_of=None,
-        ),
-        ScoredItem(
-            content_item_id="item-gpt5-source-d",
-            relevance_score=55,
-            urgency="informational",
-            relevance_tag="AI Tools",
-            executive_summary=(
-                "GPT-5 is here: OpenAI drops its most powerful model yet."
-            ),
-            scoring_reasoning="Consumer-angle reporting on the same release.",
-            is_duplicate=False,
-            duplicate_of=None,
-        ),
-        ScoredItem(
-            content_item_id="item-gpt5-source-e",
-            relevance_score=45,
-            urgency="informational",
-            relevance_tag="AI Tools",
-            executive_summary=(
-                "OpenAI announces GPT-5 availability for ChatGPT Plus users."
-            ),
-            scoring_reasoning="Brief product-availability notice for the same release.",
-            is_duplicate=False,
-            duplicate_of=None,
-        ),
-    ]
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+    monkeypatch.setenv("COST_ALERT_THRESHOLD_USD", "10.00")
+    monkeypatch.setenv("SES_SENDER", "alerts@example.com")
+    monkeypatch.setenv("ALERT_RECIPIENT", "admin@example.com")
 
-    # All five items cover the same GPT-5 release — LLM returns is_duplicate=true
-    # for every pairwise comparison initiated by the implementation.
-    def invoke_model_side_effect(modelId, body, **kwargs):
-        mock_stream = MagicMock()
-        mock_stream.read.return_value = json.dumps(
-            {"content": [{"text": json.dumps({"is_duplicate": True})}]}
-        ).encode("utf-8")
-        return {"body": mock_stream}
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
 
-    mock_bedrock = MagicMock()
-    mock_bedrock.invoke_model.side_effect = invoke_model_side_effect
-
-    with patch("src.scoring.deduplication.boto3.client", return_value=mock_bedrock):
-        result = deduplicate_by_semantics(items)
-
-    by_id = {item.content_item_id: item for item in result}
-
-    # --- Assertion 1: exactly one non-duplicate (the highest-scoring primary) ---
-    non_duplicates = [item for item in result if not item.is_duplicate]
-    assert len(non_duplicates) == 1, (
-        f"Expected exactly 1 non-duplicate item, got {len(non_duplicates)}: "
-        f"{[i.content_item_id for i in non_duplicates]}"
-    )
-    primary = non_duplicates[0]
-    assert primary.content_item_id == "item-gpt5-source-a", (
-        f"The highest-relevance item (score 90) must be the primary; "
-        f"got: {primary.content_item_id}"
+    # Write a completed PipelineRun record to S3 with known metric values
+    pipeline_run = {
+        "run_date": "2026-03-24",
+        "started_at": "2026-03-24T06:00:00+00:00",
+        "completed_at": "2026-03-24T07:30:00+00:00",
+        "sources_attempted": 12,
+        "sources_succeeded": 11,
+        "sources_failed": 1,
+        "items_ingested": 47,
+        "items_scored": 47,
+        "items_above_threshold": 8,
+        "items_in_briefing": 8,
+        "transcription_jobs": 3,
+        "estimated_cost_usd": 2.47,
+        "delivery_status": "delivered",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key="pipeline-runs/2026-03-24/run.json",
+        Body=json.dumps(pipeline_run),
     )
 
-    # --- Assertion 2: all four remaining items flagged as duplicates of the primary ---
-    duplicate_ids = {"item-gpt5-source-b", "item-gpt5-source-c",
-                     "item-gpt5-source-d", "item-gpt5-source-e"}
-    for item_id in duplicate_ids:
-        item = by_id[item_id]
-        assert item.is_duplicate is True, (
-            f"{item_id} must be flagged is_duplicate=True when 5 sources cover "
-            "the same development and it is not the highest-relevance item."
-        )
-        assert item.duplicate_of == "item-gpt5-source-a", (
-            f"{item_id}.duplicate_of must point to the primary item "
-            f"'item-gpt5-source-a', got: {item.duplicate_of!r}"
-        )
+    # Mock CloudWatch at the AWS service boundary — cost is below threshold
+    mock_cloudwatch = MagicMock()
+    mock_cloudwatch.put_metric_data.return_value = {}
 
-    # --- Assertion 3: primary item exposes also_reported_by list of duplicate IDs ---
-    # This will FAIL (RED) because ScoredItem has no also_reported_by field and
-    # deduplicate_by_semantics does not populate it.
-    assert hasattr(primary, "also_reported_by"), (
-        "The primary ScoredItem must have an 'also_reported_by' attribute so that "
-        "the briefing renderer can append 'also reported by: …' without re-scanning "
-        "the full scored list. Add also_reported_by to ScoredItem and populate it "
-        "in deduplicate_by_semantics()."
+    # Mock SES at the AWS service boundary — no alert expected (cost < threshold)
+    mock_ses = MagicMock()
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service == "cloudwatch":
+            return mock_cloudwatch
+        if service == "ses":
+            return mock_ses
+        return moto_boto3_client(service, **kw)
+
+    with patch("src.monitoring.handler.boto3.client", side_effect=client_factory):
+        with caplog.at_level(logging.INFO):
+            result = handler({}, None)
+
+    assert result["status"] == "ok"
+
+    # Collect all log text for inspection
+    all_log_messages = " ".join(r.message for r in caplog.records)
+
+    # 1. Sources scanned (sources_succeeded=11)
+    assert "11" in all_log_messages, (
+        f"Logs must include sources scanned count (11). "
+        f"Got log messages: {all_log_messages!r}"
     )
-    also_reported = set(primary.also_reported_by)
-    assert also_reported == duplicate_ids, (
-        f"primary.also_reported_by must contain the ids of all 4 duplicate items. "
-        f"Expected: {duplicate_ids}, got: {also_reported}"
+
+    # 2. Items ingested (items_ingested=47)
+    assert "47" in all_log_messages, (
+        f"Logs must include items ingested count (47). "
+        f"Got log messages: {all_log_messages!r}"
+    )
+
+    # 3. Items scored above threshold (items_above_threshold=8)
+    assert "8" in all_log_messages, (
+        f"Logs must include items above threshold count (8). "
+        f"Got log messages: {all_log_messages!r}"
+    )
+
+    # 4. Transcription jobs run (transcription_jobs=3)
+    assert "3" in all_log_messages, (
+        f"Logs must include transcription jobs count (3). "
+        f"Got log messages: {all_log_messages!r}"
+    )
+
+    # 5. Total estimated cost ($2.47)
+    assert "2.47" in all_log_messages, (
+        f"Logs must include estimated cost (2.47). "
+        f"Got log messages: {all_log_messages!r}"
     )
 
 ## Public Interfaces (from interfaces.md)
