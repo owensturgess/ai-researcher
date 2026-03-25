@@ -43,8 +43,25 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B016: When a YouTube video has no transcript and transcription fails, the item is included with a "transcript unavailable" flag; title, source, and link are still provided
-Linked tasks: T032
+Behavior B017: When a podcast episode exceeds 2 hours and would exceed the daily transcription budget cap, it is flagged as "transcript unavailable" with the link still included
+Linked tasks: T033
+
+## Previous Validation Feedback (MUST address these issues)
+Rule 3 (Survives refactor) — the test patches `mutagen.mp3.MP3` directly:
+
+    with (
+        patch("urllib.request.urlopen", return_value=mock_http_response),
+        patch("mutagen.mp3.MP3", mock_mp3_class),
+    ):
+
+This couples the test to the specific library used internally for audio duration detection. If the implementation is refactored to use `pydub`, `ffprobe`, `audioread`, or any other mechanism to determine episode length, the patch target no longer exists and the test fails — even though the public interface contract (handler returns `transcript_status='failed'` for episodes exceeding the budget cap, item preserved in S3) is completely unchanged.
+
+`urllib.request.urlopen` is a network I/O boundary and is correctly mocked. `mutagen.mp3.MP3` is a local library call that is an implementation detail, not a system boundary.
+
+How to fix: Replace the `mutagen.mp3.MP3` mock with a real minimal MP3 binary fixture stored in `tests/fixtures/` whose ID3/Xing headers encode a duration ≥ 130 minutes (e.g., set the TLEN frame or Xing frame to report the correct number of frames). Feed that fixture's bytes as `mock_http_response.read.return_value` and remove the `mutagen` patch entirely. The actual `mutagen` (or any future replacement) will read the fixture's real metadata, and the test will survive any change to the duration-detection library as long as the handler's public behaviour is preserved.
+
+If generating a fixture MP3 with embedded duration metadata is not feasible, an equally valid fix is to lower `DAILY_TRANSCRIPTION_BUDGET_MINUTES` to `"0"` and remove the 2-hour per-episode check from the scenario so the budget cap alone triggers the failure — then the test only needs the audio download mock and a tiny real MP3 fixture, with no `mutagen` patch at all.
+```
 
 ## Public Interfaces (from interfaces.md)
 
@@ -915,6 +932,101 @@ def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(c
     # A rate-limit-specific warning must be logged
     rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
     assert len(rate_limit_logs) >= 1
+
+--- tests/unit/test_youtube_transcription_failure.py ---
+# tests/unit/test_youtube_transcription_failure.py
+import json
+from unittest.mock import patch, MagicMock
+
+import boto3
+from moto import mock_aws
+
+from src.transcription.handler import handler
+
+
+@mock_aws
+def test_youtube_no_transcript_and_transcription_failure_item_preserved_with_unavailable_flag(
+    monkeypatch,
+):
+    """
+    Given a YouTube video with no subtitles where both yt-dlp subtitle download
+    and audio transcription fail, when the handler processes the item, it returns
+    transcript_status='failed' and the ContentItem in S3 retains its title,
+    source_name, and original_url — the item is not dropped from the pipeline.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item_id = "yt-item-no-transcript"
+    source_id = "yt-source-1"
+    video_url = "https://www.youtube.com/watch?v=noTranscriptVideoId"
+    item_title = "AI Summit Keynote: No Captions Available"
+    source_name = "AI Conference Channel"
+
+    # Write the raw ContentItem to S3
+    content_item = {
+        "id": item_id,
+        "title": item_title,
+        "source_id": source_id,
+        "source_name": source_name,
+        "published_date": "2026-03-24T10:00:00+00:00",
+        "full_text": "",
+        "original_url": video_url,
+        "content_format": "video",
+        "transcript_status": "pending",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{source_id}/{item_id}.json",
+        Body=json.dumps(content_item),
+    )
+
+    # SQS event for the YouTube video
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "item_id": item_id,
+                        "source_id": source_id,
+                        "content_format": "video",
+                        "original_url": video_url,
+                        "run_date": "2026-03-24",
+                    }
+                )
+            }
+        ]
+    }
+
+    # yt-dlp raises an exception — no subtitles and audio extraction fails
+    mock_ydl_instance = MagicMock()
+    mock_ydl_instance.__enter__ = lambda s: s
+    mock_ydl_instance.__exit__ = MagicMock(return_value=False)
+    mock_ydl_instance.extract_info.side_effect = Exception(
+        "No subtitles available and audio download failed"
+    )
+
+    mock_ydl_class = MagicMock(return_value=mock_ydl_instance)
+
+    with patch("src.transcription.handler.yt_dlp.YoutubeDL", mock_ydl_class):
+        result = handler(event, None)
+
+    # Handler must report transcript_status=failed — not raise or swallow the failure silently
+    assert result["transcript_status"] == "failed"
+
+    # The ContentItem in S3 must still preserve title, source_name, and original_url
+    updated_item_key = f"raw/2026-03-24/{source_id}/{item_id}.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=updated_item_key)
+    updated_item = json.loads(response["Body"].read())
+
+    assert updated_item["title"] == item_title
+    assert updated_item["source_name"] == source_name
+    assert updated_item["original_url"] == video_url
+    # transcript_status must be 'failed' (the "transcript unavailable" flag)
+    assert updated_item["transcript_status"] == "failed"
 
 --- tests/unit/test_podcast_transcription.py ---
 # tests/unit/test_podcast_transcription.py

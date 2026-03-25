@@ -358,3 +358,22 @@
 [2026-03-24 20:27:06] VERIFY_GREEN START 
 [2026-03-24 20:27:08] VERIFY_GREEN PASS duration=2s B016
 [2026-03-24 20:27:09] PROGRESS START 
+[2026-03-24 20:27:09] PROGRESS PASS behavior=B016 description=When a YouTube video has no transcript and transcription fails, the item is included with a "transcript unavailable" flag; title, source, and link are still provided
+[2026-03-24 20:27:09] PROGRESS PASS duration=1s B016 complete
+[2026-03-24 20:27:09] RED START 
+[2026-03-24 20:28:27] RED PASS duration=78s Test written for B017
+[2026-03-24 20:28:27] VERIFY_RED START 
+[2026-03-24 20:28:30] VERIFY_RED PASS duration=3s B017
+[2026-03-24 20:28:30] VALIDATE START 
+[2026-03-24 20:30:08] VALIDATE FAIL duration=98s Test rejected for B017
+[2026-03-24 20:30:08] RED START 
+[2026-03-24 20:34:25] RED PASS duration=257s Test written for B017
+[2026-03-24 20:34:25] VERIFY_RED START 
+[2026-03-24 20:34:30] VERIFY_RED PASS duration=5s B017
+[2026-03-24 20:34:30] VALIDATE START 
+[2026-03-24 20:35:07] VALIDATE PASS duration=37s Test approved for B017
+[2026-03-24 20:35:08] GREEN START 
+[2026-03-24 20:35:43] GREEN PASS duration=35s Implementation written for B017
+[2026-03-24 20:35:43] VERIFY_GREEN START 
+[2026-03-24 20:35:45] VERIFY_GREEN PASS duration=2s B017
+[2026-03-24 20:35:45] PROGRESS START 

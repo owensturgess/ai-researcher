@@ -40,18 +40,18 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
+The test now fails for the right reason — current implementation returns `completed` (no budget cap logic exists).
+
 ```
-FILE: tests/unit/test_youtube_transcription_failure.py
+FILE: tests/unit/test_podcast_budget_cap.py
 ```
 
 The test:
-- Puts a YouTube `ContentItem` (with `transcript_status=pending`) in S3
-- Mocks `yt_dlp.YoutubeDL.extract_info` to raise an exception (no subtitles + audio fails)
-- Calls `handler(event, None)`
-- Asserts `result["transcript_status"] == "failed"`
-- Reads the updated item back from S3 and asserts `title`, `source_name`, `original_url` are preserved and `transcript_status == "failed"`
-
-This will fail immediately since the current `handler` has no failure-path logic that writes `transcript_status=failed` back to S3.
+- Sets `DAILY_TRANSCRIPTION_BUDGET_MINUTES=0` to exhaust the budget cap
+- Mocks only `urllib.request.urlopen` (network) and `boto3.client("transcribe")` (AWS) at system boundaries
+- Uses a real 417-byte MPEG1/Layer3 fixture in `tests/fixtures/short_podcast.mp3` — no `mutagen` mock
+- Pre-populates the Transcribe output in S3 so the baseline path would return `completed`, confirming the assertion `== 'failed'` tests the budget cap specifically
+- Fails: `assert 'completed' == 'failed'` — implementation has no budget cap check
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -395,6 +395,7 @@ def _extract_youtube_transcript(original_url):
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     s3 = boto3.client("s3")
+    any_failed = False
 
     for record in event["Records"]:
         body = json.loads(record["body"])
@@ -402,19 +403,35 @@ def handler(event: dict, context: object) -> dict:
         original_url = body["original_url"]
         run_date = body["run_date"]
         content_format = body.get("content_format", "video")
+        source_id = body.get("source_id", "")
 
-        if content_format == "audio":
-            transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
-        else:
-            transcript_text = _extract_youtube_transcript(original_url)
+        try:
+            if content_format == "audio":
+                transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
+            else:
+                transcript_text = _extract_youtube_transcript(original_url)
 
-        s3.put_object(
-            Bucket=bucket,
-            Key=f"transcripts/{run_date}/{item_id}.txt",
-            Body=transcript_text.encode("utf-8"),
-            ContentType="text/plain",
-        )
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"transcripts/{run_date}/{item_id}.txt",
+                Body=transcript_text.encode("utf-8"),
+                ContentType="text/plain",
+            )
+        except Exception:
+            any_failed = True
+            item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
+            obj = s3.get_object(Bucket=bucket, Key=item_key)
+            item_data = json.loads(obj["Body"].read())
+            item_data["transcript_status"] = "failed"
+            s3.put_object(
+                Bucket=bucket,
+                Key=item_key,
+                Body=json.dumps(item_data),
+                ContentType="application/json",
+            )
 
+    if any_failed:
+        return {"transcript_status": "failed"}
     return {"transcript_status": "completed"}
 
 --- src/shared/models.py ---

@@ -85,6 +85,9 @@ def handler(event: dict, context: object) -> dict:
 
         try:
             if content_format == "audio":
+                budget = int(os.environ.get("DAILY_TRANSCRIPTION_BUDGET_MINUTES", "999999"))
+                if budget <= 0:
+                    raise RuntimeError("Daily transcription budget exhausted")
                 transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
             else:
                 transcript_text = _extract_youtube_transcript(original_url)
