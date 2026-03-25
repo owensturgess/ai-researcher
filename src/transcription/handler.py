@@ -70,6 +70,19 @@ def _extract_youtube_transcript(original_url):
     return ""
 
 
+def _mark_transcript_failed(s3, bucket, run_date, source_id, item_id):
+    item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
+    obj = s3.get_object(Bucket=bucket, Key=item_key)
+    item_data = json.loads(obj["Body"].read())
+    item_data["transcript_status"] = "failed"
+    s3.put_object(
+        Bucket=bucket,
+        Key=item_key,
+        Body=json.dumps(item_data),
+        ContentType="application/json",
+    )
+
+
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     s3 = boto3.client("s3")
@@ -100,16 +113,7 @@ def handler(event: dict, context: object) -> dict:
             )
         except Exception:
             any_failed = True
-            item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
-            obj = s3.get_object(Bucket=bucket, Key=item_key)
-            item_data = json.loads(obj["Body"].read())
-            item_data["transcript_status"] = "failed"
-            s3.put_object(
-                Bucket=bucket,
-                Key=item_key,
-                Body=json.dumps(item_data),
-                ContentType="application/json",
-            )
+            _mark_transcript_failed(s3, bucket, run_date, source_id, item_id)
 
     if any_failed:
         return {"transcript_status": "failed"}

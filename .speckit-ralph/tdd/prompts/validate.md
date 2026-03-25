@@ -41,96 +41,127 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_priority_ordered_ingestion.py
-# tests/unit/test_priority_ordered_ingestion.py
-import textwrap
-from unittest.mock import patch, MagicMock
+# tests/unit/test_scoring_relevance.py
+# tests/unit/test_scoring_relevance.py
+import json
+from unittest.mock import MagicMock, patch
 
 import boto3
 from moto import mock_aws
 
-from src.ingestion.handler import handler
+from src.scoring.handler import handler
 
 
 @mock_aws
-def test_sources_ingested_in_priority_order_regardless_of_yaml_declaration_order(
+def test_each_content_item_receives_relevance_score_between_0_and_100(
     monkeypatch, tmp_path
 ):
     """
-    Given three RSS sources declared in YAML with priorities 3, 1, 2 (non-sorted),
-    when the handler runs, it invokes each source ingestion in ascending priority
-    order (priority 1 first, then 2, then 3) — ensuring highest-value sources
-    are processed first when rate limits may constrain total volume.
+    Given a batch of ingested ContentItems in S3 and a configured company context
+    prompt, when the scoring handler runs, each item is scored by the LLM and a
+    ScoredItem is written to S3 at scored/{date}/{item_id}.json with a
+    relevance_score between 0 and 100 inclusive.
     """
     monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
-    monkeypatch.setenv(
-        "TRANSCRIPTION_QUEUE_URL",
-        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
-    )
     monkeypatch.setenv("RUN_DATE", "2026-03-24")
 
-    # Sources declared in non-priority order: 3, 1, 2
-    sources_yaml = textwrap.dedent("""\
-        sources:
-          - id: src-priority-3
-            name: Low Priority Feed
-            type: rss
-            url: https://low-priority.example.com/feed.xml
-            category: ai
-            active: true
-            priority: 3
-          - id: src-priority-1
-            name: High Priority Feed
-            type: rss
-            url: https://high-priority.example.com/feed.xml
-            category: ai
-            active: true
-            priority: 1
-          - id: src-priority-2
-            name: Medium Priority Feed
-            type: rss
-            url: https://medium-priority.example.com/feed.xml
-            category: ai
-            active: true
-            priority: 2
-    """)
-    config_file = tmp_path / "sources.yaml"
-    config_file.write_text(sources_yaml)
-    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+    # Write context-prompt.txt at the filesystem boundary
+    context_prompt = (
+        "Score content for relevance to agentic SDLC transformation goals."
+    )
+    context_file = tmp_path / "context-prompt.txt"
+    context_file.write_text(context_prompt)
+    monkeypatch.setenv("CONTEXT_PROMPT_PATH", str(context_file))
 
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="test-pipeline-bucket")
-    sqs = boto3.client("sqs", region_name="us-east-1")
-    sqs.create_queue(QueueName="test-transcription-queue")
 
-    # Track the URL order that feedparser.parse is called with
-    call_order = []
+    # Write two ContentItems to S3 at the raw path
+    items = [
+        {
+            "id": "item-001",
+            "title": "Claude 4 Released with Agentic Capabilities",
+            "source_id": "src-rss-1",
+            "source_name": "AI News",
+            "published_date": "2026-03-24T08:00:00+00:00",
+            "full_text": "Anthropic released Claude 4 with major agentic improvements.",
+            "original_url": "https://example.com/claude-4",
+            "content_format": "text",
+            "transcript_status": "not_needed",
+        },
+        {
+            "id": "item-002",
+            "title": "Local Weather Forecast for March",
+            "source_id": "src-rss-2",
+            "source_name": "Weather Feed",
+            "published_date": "2026-03-24T07:00:00+00:00",
+            "full_text": "Expect sunny skies with a high of 72 degrees.",
+            "original_url": "https://example.com/weather",
+            "content_format": "text",
+            "transcript_status": "not_needed",
+        },
+    ]
+    for item in items:
+        s3.put_object(
+            Bucket="test-pipeline-bucket",
+            Key=f"raw/2026-03-24/{item['source_id']}/{item['id']}.json",
+            Body=json.dumps(item),
+        )
 
-    def parse_side_effect(url, *args, **kwargs):
-        call_order.append(url)
-        feed = MagicMock()
-        feed.bozo = False
-        feed.entries = []
-        return feed
+    # Mock Bedrock at the AWS service boundary — returns structured JSON scores
+    def bedrock_invoke_side_effect(modelId, body, **kwargs):
+        request = json.loads(body)
+        # Return a different score per item based on content to simulate LLM scoring
+        title = ""
+        for msg in request.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                title = content
+                break
+        score = 85 if "Claude" in title or "claude" in title.lower() else 12
+        response_body = json.dumps({
+            "score": score,
+            "urgency": "worth_discussing",
+            "relevance_tag": "AI Tools",
+            "summary": "Summary of the item.",
+            "reasoning": "Scored based on relevance to agentic SDLC.",
+        })
+        mock_stream = MagicMock()
+        mock_stream.read.return_value = json.dumps({
+            "content": [{"text": response_body}]
+        }).encode("utf-8")
+        return {"body": mock_stream}
 
-    with patch("feedparser.parse", side_effect=parse_side_effect):
-        handler({}, None)
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.side_effect = bedrock_invoke_side_effect
 
-    # All three sources must be attempted
-    assert len(call_order) == 3
+    moto_boto3_client = boto3.client
 
-    # Priority=1 (high-priority) must be ingested first
-    assert "high-priority" in call_order[0], (
-        f"Expected priority=1 source first, got: {call_order}"
-    )
-    # Priority=2 (medium-priority) must be ingested second
-    assert "medium-priority" in call_order[1], (
-        f"Expected priority=2 source second, got: {call_order}"
-    )
-    # Priority=3 (low-priority) must be ingested last
-    assert "low-priority" in call_order[2], (
-        f"Expected priority=3 source last, got: {call_order}"
-    )
+    def client_factory(service, **kw):
+        if service in ("bedrock-runtime", "bedrock"):
+            return mock_bedrock
+        return moto_boto3_client(service, **kw)
+
+    with patch("src.scoring.handler.boto3.client", side_effect=client_factory):
+        result = handler({}, None)
+
+    # Handler must report all items scored
+    assert result["items_scored"] == 2
+
+    # Each item must have a ScoredItem written to S3 with relevance_score in [0, 100]
+    for item in items:
+        key = f"scored/2026-03-24/{item['id']}.json"
+        response = s3.get_object(Bucket="test-pipeline-bucket", Key=key)
+        scored = json.loads(response["Body"].read())
+
+        assert "relevance_score" in scored, f"relevance_score missing for {item['id']}"
+        score = scored["relevance_score"]
+        assert isinstance(score, (int, float)), (
+            f"relevance_score must be numeric, got {type(score)} for {item['id']}"
+        )
+        assert 0 <= score <= 100, (
+            f"relevance_score {score} out of [0,100] range for {item['id']}"
+        )
 
 ## Public Interfaces (from interfaces.md)
 

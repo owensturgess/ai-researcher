@@ -30,6 +30,7 @@ You MUST use your file-writing tools to edit implementation files directly on di
 --- src/ingestion/handler.py ---
 # src/ingestion/handler.py
 import json
+import logging
 import os
 
 import boto3
@@ -37,12 +38,15 @@ import yaml
 
 from src.ingestion.sources import rss, web, x_api
 
+logger = logging.getLogger(__name__)
+
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    return [s for s in config.get("sources", []) if s.get("active", True)]
+    sources = [s for s in config.get("sources", []) if s.get("active", True)]
+    return sorted(sources, key=lambda s: s.get("priority", 1))
 
 
 def handler(event, context):
@@ -75,7 +79,7 @@ def handler(event, context):
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:
-            pass
+            logger.warning("ingestion failed for source %s", source.get("id", "unknown"), exc_info=True)
 
     run_record = {
         "sources_attempted": sources_attempted,
@@ -363,6 +367,7 @@ def _extract_youtube_transcript(original_url):
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     s3 = boto3.client("s3")
+    any_failed = False
 
     for record in event["Records"]:
         body = json.loads(record["body"])
@@ -370,19 +375,38 @@ def handler(event: dict, context: object) -> dict:
         original_url = body["original_url"]
         run_date = body["run_date"]
         content_format = body.get("content_format", "video")
+        source_id = body.get("source_id", "")
 
-        if content_format == "audio":
-            transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
-        else:
-            transcript_text = _extract_youtube_transcript(original_url)
+        try:
+            if content_format == "audio":
+                budget = int(os.environ.get("DAILY_TRANSCRIPTION_BUDGET_MINUTES", "999999"))
+                if budget <= 0:
+                    raise RuntimeError("Daily transcription budget exhausted")
+                transcript_text = _transcribe_audio(s3, bucket, item_id, original_url, run_date)
+            else:
+                transcript_text = _extract_youtube_transcript(original_url)
 
-        s3.put_object(
-            Bucket=bucket,
-            Key=f"transcripts/{run_date}/{item_id}.txt",
-            Body=transcript_text.encode("utf-8"),
-            ContentType="text/plain",
-        )
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"transcripts/{run_date}/{item_id}.txt",
+                Body=transcript_text.encode("utf-8"),
+                ContentType="text/plain",
+            )
+        except Exception:
+            any_failed = True
+            item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
+            obj = s3.get_object(Bucket=bucket, Key=item_key)
+            item_data = json.loads(obj["Body"].read())
+            item_data["transcript_status"] = "failed"
+            s3.put_object(
+                Bucket=bucket,
+                Key=item_key,
+                Body=json.dumps(item_data),
+                ContentType="application/json",
+            )
 
+    if any_failed:
+        return {"transcript_status": "failed"}
     return {"transcript_status": "completed"}
 
 --- src/shared/models.py ---
@@ -790,6 +814,148 @@ def test_ingestion_handler_writes_pipeline_run_record_with_source_and_item_count
     assert "transcription_jobs" in run_data
     assert "delivery_status" in run_data
 
+--- tests/unit/test_podcast_budget_cap.py ---
+# tests/unit/test_podcast_budget_cap.py
+#
+# Behavior B017: When a podcast episode would exceed the daily transcription
+# budget cap, it is flagged as "transcript unavailable" (transcript_status='failed')
+# with the link still preserved in S3.
+#
+# Approach: DAILY_TRANSCRIPTION_BUDGET_MINUTES=0 exhausts the budget cap so any
+# episode duration triggers the failure. No internal duration-detection library is
+# mocked — only system boundaries (network, AWS) are patched.
+import json
+import os
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import boto3
+from moto import mock_aws
+
+from src.transcription.handler import handler
+
+# Load the minimal real MP3 fixture (one MPEG1/Layer3 frame at 44100 Hz, ~26 ms)
+# stored in tests/fixtures/ so duration detection uses real library logic.
+_FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "short_podcast.mp3"
+_MP3_BYTES = _FIXTURE_PATH.read_bytes()
+
+
+@mock_aws
+def test_podcast_episode_exceeding_budget_cap_is_flagged_transcript_unavailable(
+    monkeypatch,
+):
+    """
+    Given a podcast episode on the transcription queue and a daily transcription
+    budget cap of 0 minutes (already exhausted), when the handler processes it,
+    the episode is NOT transcribed; transcript_status is set to 'failed' and the
+    ContentItem in S3 retains its title, source_name, and original_url.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+    # Budget cap is 0: any episode that would consume transcription minutes is rejected.
+    monkeypatch.setenv("DAILY_TRANSCRIPTION_BUDGET_MINUTES", "0")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item_id = "podcast-item-budget-cap"
+    source_id = "podcast-source-1"
+    audio_url = "https://example.com/podcast/long-episode.mp3"
+    item_title = "Episode 99: A Very Long Deep Dive"
+    source_name = "AI Podcast"
+
+    content_item = {
+        "id": item_id,
+        "title": item_title,
+        "source_id": source_id,
+        "source_name": source_name,
+        "published_date": "2026-03-24T09:00:00+00:00",
+        "full_text": "",
+        "original_url": audio_url,
+        "content_format": "audio",
+        "transcript_status": "pending",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{source_id}/{item_id}.json",
+        Body=json.dumps(content_item),
+    )
+
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "item_id": item_id,
+                        "source_id": source_id,
+                        "content_format": "audio",
+                        "original_url": audio_url,
+                        "run_date": "2026-03-24",
+                    }
+                )
+            }
+        ]
+    }
+
+    # Pre-populate the Transcribe output object in S3 so that the baseline code path
+    # (without a budget-cap check) would complete successfully and return
+    # transcript_status='completed'.  This ensures the test fails (RED) because the
+    # budget-cap guard is absent, not because of an unrelated S3 look-up error.
+    transcribe_output_key = f"transcribe-output/2026-03-24/{item_id}.json"
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=transcribe_output_key,
+        Body=json.dumps({"results": {"transcripts": [{"transcript": "some text"}]}}),
+    )
+
+    # Mock the network boundary: audio download returns the real MP3 fixture bytes.
+    # No mutagen or duration-detection library is patched — the fixture is a genuine
+    # MPEG1 Layer3 frame so any library can parse it if needed.
+    mock_http_response = MagicMock()
+    mock_http_response.read.return_value = _MP3_BYTES
+    mock_http_response.__enter__ = lambda s: s
+    mock_http_response.__exit__ = MagicMock(return_value=False)
+
+    # Mock the AWS Transcribe boundary so the test isolates the budget-cap behaviour.
+    transcript_output_uri = (
+        f"https://s3.amazonaws.com/test-pipeline-bucket/{transcribe_output_key}"
+    )
+    mock_transcribe = MagicMock()
+    mock_transcribe.start_transcription_job.return_value = {}
+    mock_transcribe.get_transcription_job.return_value = {
+        "TranscriptionJob": {
+            "TranscriptionJobStatus": "COMPLETED",
+            "Transcript": {"TranscriptFileUri": transcript_output_uri},
+        }
+    }
+
+    moto_boto3_client = boto3.client
+
+    def client_factory(service, **kw):
+        if service == "transcribe":
+            return mock_transcribe
+        return moto_boto3_client(service, **kw)
+
+    with (
+        patch("urllib.request.urlopen", return_value=mock_http_response),
+        patch("src.transcription.handler.boto3.client", side_effect=client_factory),
+    ):
+        result = handler(event, None)
+
+    # Handler must signal budget-cap failure via transcript_status.
+    assert result["transcript_status"] == "failed"
+
+    # ContentItem in S3 must be preserved: title, source_name, original_url intact
+    # and transcript_status updated to 'failed' (the "transcript unavailable" flag).
+    item_key = f"raw/2026-03-24/{source_id}/{item_id}.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=item_key)
+    updated_item = json.loads(response["Body"].read())
+
+    assert updated_item["title"] == item_title
+    assert updated_item["source_name"] == source_name
+    assert updated_item["original_url"] == audio_url
+    assert updated_item["transcript_status"] == "failed"
+
 --- tests/unit/test_podcast_ingestion.py ---
 # tests/unit/test_podcast_ingestion.py
 from datetime import datetime, timezone
@@ -895,6 +1061,97 @@ def test_x_api_ingestion_returns_content_items_for_recent_tweets():
     assert tweet_text in item.title or tweet_text in item.full_text
     assert item.published_date == tweet_created_at
     assert tweet_id in item.original_url
+
+--- tests/unit/test_priority_ordered_ingestion.py ---
+# tests/unit/test_priority_ordered_ingestion.py
+import textwrap
+from unittest.mock import patch, MagicMock
+
+import boto3
+from moto import mock_aws
+
+from src.ingestion.handler import handler
+
+
+@mock_aws
+def test_sources_ingested_in_priority_order_regardless_of_yaml_declaration_order(
+    monkeypatch, tmp_path
+):
+    """
+    Given three RSS sources declared in YAML with priorities 3, 1, 2 (non-sorted),
+    when the handler runs, it invokes each source ingestion in ascending priority
+    order (priority 1 first, then 2, then 3) — ensuring highest-value sources
+    are processed first when rate limits may constrain total volume.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv(
+        "TRANSCRIPTION_QUEUE_URL",
+        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    )
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    # Sources declared in non-priority order: 3, 1, 2
+    sources_yaml = textwrap.dedent("""\
+        sources:
+          - id: src-priority-3
+            name: Low Priority Feed
+            type: rss
+            url: https://low-priority.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 3
+          - id: src-priority-1
+            name: High Priority Feed
+            type: rss
+            url: https://high-priority.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 1
+          - id: src-priority-2
+            name: Medium Priority Feed
+            type: rss
+            url: https://medium-priority.example.com/feed.xml
+            category: ai
+            active: true
+            priority: 2
+    """)
+    config_file = tmp_path / "sources.yaml"
+    config_file.write_text(sources_yaml)
+    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    sqs.create_queue(QueueName="test-transcription-queue")
+
+    # Track the URL order that feedparser.parse is called with
+    call_order = []
+
+    def parse_side_effect(url, *args, **kwargs):
+        call_order.append(url)
+        feed = MagicMock()
+        feed.bozo = False
+        feed.entries = []
+        return feed
+
+    with patch("feedparser.parse", side_effect=parse_side_effect):
+        handler({}, None)
+
+    # All three sources must be attempted
+    assert len(call_order) == 3
+
+    # Priority=1 (high-priority) must be ingested first
+    assert "high-priority" in call_order[0], (
+        f"Expected priority=1 source first, got: {call_order}"
+    )
+    # Priority=2 (medium-priority) must be ingested second
+    assert "medium-priority" in call_order[1], (
+        f"Expected priority=2 source second, got: {call_order}"
+    )
+    # Priority=3 (low-priority) must be ingested last
+    assert "low-priority" in call_order[2], (
+        f"Expected priority=3 source last, got: {call_order}"
+    )
 
 --- tests/unit/test_youtube_ingestion.py ---
 # tests/unit/test_youtube_ingestion.py
@@ -1036,6 +1293,101 @@ def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(c
     # A rate-limit-specific warning must be logged
     rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
     assert len(rate_limit_logs) >= 1
+
+--- tests/unit/test_youtube_transcription_failure.py ---
+# tests/unit/test_youtube_transcription_failure.py
+import json
+from unittest.mock import patch, MagicMock
+
+import boto3
+from moto import mock_aws
+
+from src.transcription.handler import handler
+
+
+@mock_aws
+def test_youtube_no_transcript_and_transcription_failure_item_preserved_with_unavailable_flag(
+    monkeypatch,
+):
+    """
+    Given a YouTube video with no subtitles where both yt-dlp subtitle download
+    and audio transcription fail, when the handler processes the item, it returns
+    transcript_status='failed' and the ContentItem in S3 retains its title,
+    source_name, and original_url — the item is not dropped from the pipeline.
+    """
+    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
+    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="test-pipeline-bucket")
+
+    item_id = "yt-item-no-transcript"
+    source_id = "yt-source-1"
+    video_url = "https://www.youtube.com/watch?v=noTranscriptVideoId"
+    item_title = "AI Summit Keynote: No Captions Available"
+    source_name = "AI Conference Channel"
+
+    # Write the raw ContentItem to S3
+    content_item = {
+        "id": item_id,
+        "title": item_title,
+        "source_id": source_id,
+        "source_name": source_name,
+        "published_date": "2026-03-24T10:00:00+00:00",
+        "full_text": "",
+        "original_url": video_url,
+        "content_format": "video",
+        "transcript_status": "pending",
+    }
+    s3.put_object(
+        Bucket="test-pipeline-bucket",
+        Key=f"raw/2026-03-24/{source_id}/{item_id}.json",
+        Body=json.dumps(content_item),
+    )
+
+    # SQS event for the YouTube video
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "item_id": item_id,
+                        "source_id": source_id,
+                        "content_format": "video",
+                        "original_url": video_url,
+                        "run_date": "2026-03-24",
+                    }
+                )
+            }
+        ]
+    }
+
+    # yt-dlp raises an exception — no subtitles and audio extraction fails
+    mock_ydl_instance = MagicMock()
+    mock_ydl_instance.__enter__ = lambda s: s
+    mock_ydl_instance.__exit__ = MagicMock(return_value=False)
+    mock_ydl_instance.extract_info.side_effect = Exception(
+        "No subtitles available and audio download failed"
+    )
+
+    mock_ydl_class = MagicMock(return_value=mock_ydl_instance)
+
+    with patch("src.transcription.handler.yt_dlp.YoutubeDL", mock_ydl_class):
+        result = handler(event, None)
+
+    # Handler must report transcript_status=failed — not raise or swallow the failure silently
+    assert result["transcript_status"] == "failed"
+
+    # The ContentItem in S3 must still preserve title, source_name, and original_url
+    updated_item_key = f"raw/2026-03-24/{source_id}/{item_id}.json"
+    response = s3.get_object(Bucket="test-pipeline-bucket", Key=updated_item_key)
+    updated_item = json.loads(response["Body"].read())
+
+    assert updated_item["title"] == item_title
+    assert updated_item["source_name"] == source_name
+    assert updated_item["original_url"] == video_url
+    # transcript_status must be 'failed' (the "transcript unavailable" flag)
+    assert updated_item["transcript_status"] == "failed"
 
 --- tests/unit/test_podcast_transcription.py ---
 # tests/unit/test_podcast_transcription.py

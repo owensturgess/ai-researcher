@@ -40,13 +40,15 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected — sources are currently processed in YAML declaration order (3, 1, 2) rather than priority order.
-
 ```
-FILE: tests/unit/test_priority_ordered_ingestion.py
+FILE: tests/unit/test_scoring_relevance.py
 ```
 
-The test correctly fails because the handler currently ingests sources in YAML declaration order (`low-priority` first, `high-priority` second) instead of ascending priority order (`high-priority` → `medium-priority` → `low-priority`).
+The test:
+- Writes two `ContentItem` JSON blobs to mocked S3 (`raw/2026-03-24/{source_id}/{item_id}.json`)
+- Mocks Bedrock at the AWS service boundary, returning structured JSON with a `score` field
+- Calls `handler({}, None)` from `src/scoring/handler.py` (which doesn't exist yet → import fails → test fails RED)
+- Asserts each item has a `scored/{date}/{item_id}.json` in S3 with `relevance_score` in [0, 100]
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -64,12 +66,15 @@ from src.ingestion.sources import rss, web, x_api
 
 logger = logging.getLogger(__name__)
 
+_INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
+
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    return [s for s in config.get("sources", []) if s.get("active", True)]
+    sources = [s for s in config.get("sources", []) if s.get("active", True)]
+    return sorted(sources, key=lambda s: s.get("priority", 1))
 
 
 def handler(event, context):
@@ -82,11 +87,9 @@ def handler(event, context):
     sources_succeeded = 0
     all_items = []
 
-    ingesters = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
-
     for source in sources:
         source_type = source.get("type")
-        ingest_fn = ingesters.get(source_type)
+        ingest_fn = _INGESTERS.get(source_type)
         if ingest_fn is None:
             continue
         try:
@@ -387,6 +390,19 @@ def _extract_youtube_transcript(original_url):
     return ""
 
 
+def _mark_transcript_failed(s3, bucket, run_date, source_id, item_id):
+    item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
+    obj = s3.get_object(Bucket=bucket, Key=item_key)
+    item_data = json.loads(obj["Body"].read())
+    item_data["transcript_status"] = "failed"
+    s3.put_object(
+        Bucket=bucket,
+        Key=item_key,
+        Body=json.dumps(item_data),
+        ContentType="application/json",
+    )
+
+
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     s3 = boto3.client("s3")
@@ -417,16 +433,7 @@ def handler(event: dict, context: object) -> dict:
             )
         except Exception:
             any_failed = True
-            item_key = f"raw/{run_date}/{source_id}/{item_id}.json"
-            obj = s3.get_object(Bucket=bucket, Key=item_key)
-            item_data = json.loads(obj["Body"].read())
-            item_data["transcript_status"] = "failed"
-            s3.put_object(
-                Bucket=bucket,
-                Key=item_key,
-                Body=json.dumps(item_data),
-                ContentType="application/json",
-            )
+            _mark_transcript_failed(s3, bucket, run_date, source_id, item_id)
 
     if any_failed:
         return {"transcript_status": "failed"}

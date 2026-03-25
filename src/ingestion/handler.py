@@ -10,6 +10,8 @@ from src.ingestion.sources import rss, web, x_api
 
 logger = logging.getLogger(__name__)
 
+_INGESTERS = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
+
 
 def load_sources():
     config_path = os.environ.get("SOURCES_CONFIG", "config/sources.yaml")
@@ -29,11 +31,9 @@ def handler(event, context):
     sources_succeeded = 0
     all_items = []
 
-    ingesters = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
-
     for source in sources:
         source_type = source.get("type")
-        ingest_fn = ingesters.get(source_type)
+        ingest_fn = _INGESTERS.get(source_type)
         if ingest_fn is None:
             continue
         try:
