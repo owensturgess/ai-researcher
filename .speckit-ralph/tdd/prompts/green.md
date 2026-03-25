@@ -40,15 +40,96 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
+Results are exactly right:
+- 7 existing tests pass (including `test_x_api_ingestion.py` which was previously broken)
+- New B014 test fails with `AssertionError: 0 >= 1` — no rate-limit log emitted because pagination isn't implemented, so `TooManyRequests` is never raised and never logged
+
 ```
-FILE: tests/unit/test_ingestion_error_isolation.py
+FILE: tests/unit/test_x_api_rate_limit_mid_ingestion.py
 ```
 
-The test:
-- Sets up two active RSS sources (one at `failing.example.com`, one at `healthy.example.com`)
-- Mocks `feedparser.parse` at the network boundary with a `side_effect` that raises `HTTPError(429)` for the failing URL and returns a valid feed for the healthy one
-- Asserts `sources_attempted == 2`, `sources_succeeded == 1` — proving the failure was isolated and the handler didn't abort
-- Asserts the healthy source's items were written to S3 — proving normal processing continued past the failed source
+**What was fixed:** `x_api.py` had two bugs from a prior GREEN step (`source["url"]`/`source["id"]` dict access on a dataclass, and returning plain dicts instead of `ContentItem` objects). Fixed both to restore the full suite.
+
+**Why the B014 test fails:** The current `ingest()` makes a single `search_recent_tweets` call with no pagination loop. The mock's first page response has `meta.next_token = "page2_token"`, but because no pagination is implemented, the second call (which would raise `TooManyRequests`) is never made, so no rate-limit warning is logged. The assertion `len(rate_limit_logs) >= 1` → `0 >= 1` fails.
+
+The GREEN step must implement: paginated fetching that catches `tweepy.errors.TooManyRequests`, logs a `"rate limit"` warning, and returns already-retrieved items.
+
+## Previous GREEN Gate Failure (MUST fix these issues)
+GATE: VERIFY_GREEN for B014
+CHECK FAIL: Test suite FAILED after implementation.
+Test output:
+============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/ocs/Documents/GitHub/ai-researcher
+plugins: cov-7.0.0
+collected 8 items
+
+tests/unit/test_ingestion_error_isolation.py .                           [ 12%]
+tests/unit/test_pipeline_run_metadata.py .                               [ 25%]
+tests/unit/test_podcast_ingestion.py .                                   [ 37%]
+tests/unit/test_podcast_transcription.py .                               [ 50%]
+tests/unit/test_x_api_ingestion.py F                                     [ 62%]
+tests/unit/test_x_api_rate_limit_mid_ingestion.py .                      [ 75%]
+tests/unit/test_youtube_ingestion.py .                                   [ 87%]
+tests/unit/test_youtube_transcription.py .                               [100%]
+
+=================================== FAILURES ===================================
+_________ test_x_api_ingestion_returns_content_items_for_recent_tweets _________
+
+    def test_x_api_ingestion_returns_content_items_for_recent_tweets():
+        """
+        Given an X source and a since datetime, when ingest() is called,
+        it returns ContentItem objects for tweets published after `since`,
+        each with source_id, title, published_date, original_url, and full_text
+        populated from the tweet data.
+        """
+        source = Source(
+            id="x-source-1",
+            name="Test X Account",
+            type="x",
+            url="https://twitter.com/testaccount",
+            category="ai",
+            active=True,
+            priority=1,
+        )
+        since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
+    
+        tweet_id = "1234567890"
+        tweet_text = "Exciting AI development announced today! #AI"
+        tweet_created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
+    
+        mock_tweet = MagicMock()
+        mock_tweet.id = tweet_id
+        mock_tweet.text = tweet_text
+        mock_tweet.created_at = tweet_created_at
+    
+        mock_response = MagicMock()
+        mock_response.data = [mock_tweet]
+    
+        mock_client_instance = MagicMock()
+        mock_client_instance.search_recent_tweets.return_value = mock_response
+    
+        with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client_instance):
+>           results = ingest(source, since)
+                      ^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_x_api_ingestion.py:45: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+source = Source(id='x-source-1', name='Test X Account', type='x', url='https://twitter.com/testaccount', category='ai', active=True, priority=1)
+since = datetime.datetime(2026, 3, 23, 0, 0, tzinfo=datetime.timezone.utc)
+
+    def ingest(source, since):
+        client = tweepy.Client()
+>       username = source["url"].rstrip("/").split("/")[-1]
+                   ^^^^^^^^^^^^^
+E       TypeError: 'Source' object is not subscriptable
+
+src/ingestion/sources/x_api.py:7: TypeError
+=========================== short test summary info ============================
+FAILED tests/unit/test_x_api_ingestion.py::test_x_api_ingestion_returns_content_items_for_recent_tweets
+========================= 1 failed, 7 passed in 1.49s ==========================
+RESULT: FAIL
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -61,7 +142,7 @@ import os
 import boto3
 import yaml
 
-from src.ingestion.sources import rss, web
+from src.ingestion.sources import rss, web, x_api
 
 
 def load_sources():
@@ -81,7 +162,7 @@ def handler(event, context):
     sources_succeeded = 0
     all_items = []
 
-    ingesters = {"rss": rss.ingest, "web": web.ingest}
+    ingesters = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
     for source in sources:
         source_type = source.get("type")
@@ -90,6 +171,14 @@ def handler(event, context):
             continue
         try:
             items = ingest_fn(source, since=None)
+            for i, item in enumerate(items):
+                item_key = f"raw/{run_date}/{source['id']}/{i}.json"
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=item_key,
+                    Body=json.dumps(item),
+                    ContentType="application/json",
+                )
             all_items.extend(items)
             sources_succeeded += 1
         except Exception:
@@ -164,11 +253,11 @@ from src.shared.models import ContentItem
 
 def ingest(source, since):
     client = tweepy.Client()
-    query = f"from:{source.url.rstrip('/').split('/')[-1]}"
-    start_time = since
+    username = source.url.rstrip("/").split("/")[-1]
+    query = f"from:{username}"
     response = client.search_recent_tweets(
         query=query,
-        start_time=start_time,
+        start_time=since,
         tweet_fields=["created_at", "text"],
     )
     items = []

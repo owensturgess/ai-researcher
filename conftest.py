@@ -17,6 +17,16 @@ if "tweepy" not in sys.modules:
     tweepy_stub = _stub_module("tweepy")
     tweepy_stub.Client = None  # replaced by patch() in individual tests
 
+    # errors sub-module with TooManyRequests exception
+    tweepy_errors_stub = _stub_module("tweepy.errors")
+
+    class TooManyRequests(Exception):
+        def __init__(self, response=None):
+            self.response = response
+
+    tweepy_errors_stub.TooManyRequests = TooManyRequests
+    tweepy_stub.errors = tweepy_errors_stub
+
 if "yt_dlp" not in sys.modules:
     yt_dlp_stub = _stub_module("yt_dlp")
     yt_dlp_stub.YoutubeDL = None  # replaced by patch() in individual tests

@@ -41,91 +41,79 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_ingestion_error_isolation.py
-# tests/unit/test_ingestion_error_isolation.py
-import textwrap
-from urllib.error import HTTPError
-from unittest.mock import patch, MagicMock
+# tests/unit/test_x_api_rate_limit_mid_ingestion.py
+# tests/unit/test_x_api_rate_limit_mid_ingestion.py
+import logging
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
-import boto3
-from moto import mock_aws
+import tweepy
 
-from src.ingestion.handler import handler
+from src.ingestion.sources.x_api import ingest
+from src.shared.models import Source
 
 
-@mock_aws
-def test_failing_source_is_skipped_and_other_sources_process_normally(
-    monkeypatch, tmp_path
-):
+def test_x_api_rate_limit_mid_ingestion_returns_partial_results_and_logs_event(caplog):
     """
-    Given two RSS sources where one raises an HTTP 429 (rate limit) during
-    ingestion, when the handler runs, the failing source is skipped and the
-    other source's items are ingested normally — sources_attempted == 2 and
-    sources_succeeded == 1 in the returned counts.
+    Given an X source being ingested across multiple pages, when the X API
+    raises TooManyRequests on the second page (rate limit hit mid-ingestion),
+    ingest() returns the ContentItems already retrieved from the first page
+    and emits a warning log containing "rate limit".
     """
-    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
-    monkeypatch.setenv(
-        "TRANSCRIPTION_QUEUE_URL",
-        "https://sqs.us-east-1.amazonaws.com/123456789012/test-transcription-queue",
+    source = Source(
+        id="x-source-1",
+        name="Test X Account",
+        type="x",
+        url="https://twitter.com/testaccount",
+        category="ai",
+        active=True,
+        priority=1,
     )
-    monkeypatch.setenv("RUN_DATE", "2026-03-24")
+    since = datetime(2026, 3, 23, 0, 0, 0, tzinfo=timezone.utc)
 
-    sources_yaml = textwrap.dedent("""\
-        sources:
-          - id: src-rss-failing
-            name: Failing Feed
-            type: rss
-            url: https://failing.example.com/feed.xml
-            category: ai
-            active: true
-            priority: 1
-          - id: src-rss-ok
-            name: Healthy Feed
-            type: rss
-            url: https://healthy.example.com/feed.xml
-            category: ai
-            active: true
-            priority: 2
-    """)
-    config_file = tmp_path / "sources.yaml"
-    config_file.write_text(sources_yaml)
-    monkeypatch.setenv("SOURCES_CONFIG", str(config_file))
+    # First page: one tweet retrieved successfully, meta indicates more pages exist
+    mock_tweet = MagicMock()
+    mock_tweet.id = "tweet-page1-001"
+    mock_tweet.text = "First page tweet about AI developments"
+    mock_tweet.created_at = datetime(2026, 3, 24, 9, 0, 0, tzinfo=timezone.utc)
 
-    s3 = boto3.client("s3", region_name="us-east-1")
-    s3.create_bucket(Bucket="test-pipeline-bucket")
-    sqs = boto3.client("sqs", region_name="us-east-1")
-    sqs.create_queue(QueueName="test-transcription-queue")
+    first_page_meta = MagicMock()
+    first_page_meta.next_token = "page2_token"
 
-    # Healthy feed returns one recent entry
-    fake_healthy_feed = MagicMock()
-    fake_healthy_feed.bozo = False
-    fake_healthy_feed.entries = [
-        MagicMock(
-            title="AI Update from Healthy Source",
-            link="https://healthy.example.com/article-1",
-            published_parsed=(2026, 3, 24, 10, 0, 0, 0, 0, 0),
-            summary="A healthy AI update.",
-        )
-    ]
+    first_page_response = MagicMock()
+    first_page_response.data = [mock_tweet]
+    first_page_response.meta = first_page_meta
 
-    # feedparser.parse raises HTTPError for the failing source URL
-    def parse_side_effect(url, *args, **kwargs):
-        if "failing" in url:
-            raise HTTPError(url, 429, "Too Many Requests", {}, None)
-        return fake_healthy_feed
+    # Construct a tweepy TooManyRequests exception for the second page
+    mock_rate_limit_response = MagicMock()
+    mock_rate_limit_response.status_code = 429
+    mock_rate_limit_response.headers = {}
+    mock_rate_limit_response.json.return_value = {}
+    mock_rate_limit_response.text = "Too Many Requests"
 
-    with patch("feedparser.parse", side_effect=parse_side_effect):
-        result = handler({}, None)
+    call_count = 0
 
-    # Both sources were attempted; only the healthy one succeeded
-    assert result["sources_attempted"] == 2
-    assert result["sources_succeeded"] == 1
+    def search_side_effect(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return first_page_response
+        raise tweepy.errors.TooManyRequests(mock_rate_limit_response)
 
-    # Items from the healthy source were written to S3 despite the other failure
-    objects = s3.list_objects_v2(
-        Bucket="test-pipeline-bucket", Prefix="raw/2026-03-24/src-rss-ok/"
-    )
-    assert objects.get("KeyCount", 0) >= 1
+    mock_client = MagicMock()
+    mock_client.search_recent_tweets.side_effect = search_side_effect
+
+    with patch("src.ingestion.sources.x_api.tweepy.Client", return_value=mock_client):
+        with caplog.at_level(logging.WARNING):
+            results = ingest(source, since)
+
+    # Items from the first page must be returned despite the rate limit
+    assert len(results) == 1
+    assert results[0].source_id == "x-source-1"
+
+    # A rate-limit-specific warning must be logged
+    rate_limit_logs = [r for r in caplog.records if "rate limit" in r.message.lower()]
+    assert len(rate_limit_logs) >= 1
 
 ## Public Interfaces (from interfaces.md)
 

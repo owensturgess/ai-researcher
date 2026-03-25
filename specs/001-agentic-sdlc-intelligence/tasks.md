@@ -79,7 +79,7 @@
 
 ### Implementation for User Story 2
 
-- [ ] T028 [P] [US2] Add rate limit handling to src/ingestion/sources/x_api.py — implement backoff on 429 responses, respect X-Rate-Limit headers, log rate limit events, skip remaining X queries if daily limit exhausted
+- [x] T028 [P] [US2] Add rate limit handling to src/ingestion/sources/x_api.py — implement backoff on 429 responses, respect X-Rate-Limit headers, log rate limit events, skip remaining X queries if daily limit exhausted
 - [ ] T029 [P] [US2] Add rate limit handling to src/ingestion/sources/youtube.py — track YouTube API quota units consumed, stop YouTube queries when approaching daily quota (10,000 units), log quota usage
 - [ ] T030 [US2] Implement source priority-based ingestion ordering in src/ingestion/handler.py — sort sources by priority field (highest first) so highest-value sources are processed first when rate limits constrain volume (FR-018)
 - [x] T031 [US2] Add per-source error isolation in src/ingestion/handler.py — wrap each source ingestion in try/except, log source_id + error details, continue to next source, include failed sources in PipelineRun.sources_failed list

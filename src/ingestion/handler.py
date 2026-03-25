@@ -5,7 +5,7 @@ import os
 import boto3
 import yaml
 
-from src.ingestion.sources import rss, web
+from src.ingestion.sources import rss, web, x_api
 
 
 def load_sources():
@@ -25,7 +25,7 @@ def handler(event, context):
     sources_succeeded = 0
     all_items = []
 
-    ingesters = {"rss": rss.ingest, "web": web.ingest}
+    ingesters = {"rss": rss.ingest, "web": web.ingest, "x": x_api.ingest}
 
     for source in sources:
         source_type = source.get("type")
