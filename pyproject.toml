@@ -1,0 +1,40 @@
+[project]
+name = "ai-researcher"
+version = "0.1.0"
+description = "Agentic SDLC Daily Intelligence Briefing Agent"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.35",
+    "feedparser>=6.0",
+    "yt-dlp>=2024.0",
+    "tweepy>=4.14",
+    "beautifulsoup4>=4.12",
+    "jinja2>=3.1",
+    "requests>=2.31",
+    "pyyaml>=6.0",
+    "google-api-python-client>=2.100",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "moto[s3,sqs,ses]>=5.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "black>=24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.black]
+target-version = ["py312"]
+line-length = 120

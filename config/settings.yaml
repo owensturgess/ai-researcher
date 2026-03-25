@@ -1,0 +1,28 @@
+schedule:
+  cron: "0 5 * * ? *"  # 5 AM UTC daily (adjust for timezone)
+  timezone: "America/New_York"
+
+scoring:
+  relevance_threshold: 60
+  max_briefing_items: 10
+
+budget:
+  daily_cost_alert_threshold_usd: 20.00
+  daily_transcription_budget_usd: 15.00
+  monthly_budget_usd: 500.00
+
+recipients:
+  - name: "Owen Sturgess"
+    email: "owen@example.com"
+    timezone: "America/New_York"
+
+retention:
+  days: 30
+
+aws:
+  region: "us-east-1"
+  s3_bucket: "ai-researcher-pipeline"
+  sqs_transcription_queue: "ai-researcher-transcription"
+  ses_sender: "briefing@example.com"
+  bedrock_model_id: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  cloudwatch_namespace: "AgenticSDLCIntel"
