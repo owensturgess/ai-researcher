@@ -39,3 +39,8 @@
 - **Category**: RED-FAILURE
 - **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
 - **Added after**: B029 at 2026-03-25T04:38:24Z
+
+### Sign: aws_cdk not installed — CDK infra tests fail at collection
+- **Category**: RED-FAILURE
+- **Detail**: `import aws_cdk` raises `ModuleNotFoundError` because `aws_cdk` is not in the test environment. The GREEN phase must install `aws_cdk` and `aws-cdk-lib` (e.g., `python3 -m pip install aws-cdk-lib constructs`) before the CDK assertions can run. The `infra/` package also needs `__init__.py` files at each level so Python treats it as a package.
+- **Added after**: B036 at 2026-03-25T04:59:18Z

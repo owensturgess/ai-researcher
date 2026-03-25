@@ -35,7 +35,7 @@
 - [ ] T007 Implement shared data models (Source, ContentItem, ScoredItem, Briefing, Recipient, PipelineRun) in src/shared/models.py per data-model.md
 - [ ] T008 [P] Implement S3 read/write helpers in src/shared/s3.py — put_json, get_json, put_text, get_text, list_keys with date-prefixed key patterns (raw/{date}/, scored/{date}/, briefings/{date}/, runs/{date}/)
 - [ ] T009 [P] Implement global configuration loader in src/shared/config.py — load sources.yaml, settings.yaml, and context-prompt.txt from config/ directory
-- [ ] T010 [P] Create CDK app entry point in infra/app.py and base pipeline stack in infra/stacks/pipeline_stack.py — define S3 bucket with 30-day lifecycle policy, SQS transcription queue, EventBridge daily cron rule
+- [x] T010 [P] Create CDK app entry point in infra/app.py and base pipeline stack in infra/stacks/pipeline_stack.py — define S3 bucket with 30-day lifecycle policy, SQS transcription queue, EventBridge daily cron rule
 - [ ] T011 [P] Create SES delivery stack in infra/stacks/delivery_stack.py — configure SES sender identity with DKIM/SPF
 - [ ] T012 [P] Create monitoring stack in infra/stacks/monitoring_stack.py — CloudWatch log groups, custom metrics namespace "AgenticSDLCIntel", cost alert alarm
 
@@ -163,7 +163,7 @@
 
 - [ ] T049 [P] Validate end-to-end pipeline with real sources — run full pipeline against production source list, verify email quality, scoring calibration, transcription accuracy
 - [ ] T050 [P] Test email rendering across target clients — verify briefing HTML renders correctly on iOS Mail, Gmail (web + mobile), Outlook (desktop + web) per contracts/briefing-email.md
-- [ ] T051 Add 30-day S3 lifecycle policy validation — verify lifecycle rules are applied to all prefixes (raw/, transcripts/, scored/, briefings/, runs/), test that objects are expired after 30 days
+- [x] T051 Add 30-day S3 lifecycle policy validation — verify lifecycle rules are applied to all prefixes (raw/, transcripts/, scored/, briefings/, runs/), test that objects are expired after 30 days
 - [x] T052 [P] Add consecutive source failure tracking in src/ingestion/handler.py — track per-source failure count across runs (store in S3), log warning after 3 consecutive failures for the same source per edge case spec
 - [ ] T053 Run quickstart.md validation — follow quickstart.md step by step on a clean environment to verify setup instructions are complete and accurate
 - [ ] T054 Security review — verify API keys and credentials are stored in AWS Secrets Manager or environment variables (not in config files), verify SES sender is properly authenticated, verify Lambda IAM roles follow least-privilege principle

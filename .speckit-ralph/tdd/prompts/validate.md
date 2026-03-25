@@ -41,122 +41,52 @@ Do NOT include general advice. Be specific and actionable.
 
 ## Test File Under Review
 
-# tests/unit/test_cloudwatch_metrics_namespace.py
-# tests/unit/test_cloudwatch_metrics_namespace.py
+# tests/unit/test_s3_lifecycle_retention.py
+# tests/unit/test_s3_lifecycle_retention.py
 #
-# Behavior B035: CloudWatch custom metrics are published to the
-# "AgenticSDLCIntel" namespace with dashboard and alarms.
+# Behavior B036: Raw content, transcripts, scored items, and briefings older
+# than 30 days are automatically deleted.
 #
-# Tests the public interface handler(event, context) in src/monitoring/handler.py.
-# All per-run pipeline metrics must be published to "AgenticSDLCIntel" — not an
-# alternative namespace — so that the CDK-defined dashboard and alarms can
-# reference the same namespace and display / trigger without manual reconfiguration.
+# Tests the CDK Pipeline Stack (infra/stacks/pipeline_stack.py).
+# The S3 bucket must have an S3 lifecycle policy that expires objects after
+# 30 days across all data prefixes (raw/, transcripts/, scored/, briefings/)
+# so that storage costs remain bounded and data is purged automatically without
+# operator intervention.
 #
-# This test FAILS (RED) because the handler currently publishes per-run metrics
-# to "AiResearcher/Pipeline" rather than "AgenticSDLCIntel", and is missing
-# required metric names: sources_failed, delivery_latency_minutes, briefing_item_count.
-import json
-from unittest.mock import MagicMock, patch
+# This test FAILS (RED) because infra/stacks/pipeline_stack.py does not exist yet.
 
-import boto3
-from moto import mock_aws
+import aws_cdk as cdk
+from aws_cdk import assertions
 
-from src.monitoring.handler import handler
-
-REQUIRED_METRICS = {
-    "SourcesScanned",
-    "SourcesFailed",
-    "ItemsIngested",
-    "ItemsAboveThreshold",
-    "TranscriptionJobs",
-    "EstimatedCostUSD",
-    "DeliveryLatencyMinutes",
-    "BriefingItemCount",
-}
+from infra.stacks.pipeline_stack import PipelineStack
 
 
-@mock_aws
-def test_monitoring_handler_publishes_all_per_run_metrics_to_agentic_sdlc_intel_namespace(
-    monkeypatch,
-):
+def test_pipeline_stack_s3_bucket_has_30_day_lifecycle_expiration_across_all_prefixes():
     """
-    Given a completed PipelineRun record in S3 with all standard fields,
-    when the monitoring handler runs, it publishes all eight per-run metrics
-    (SourcesScanned, SourcesFailed, ItemsIngested, ItemsAboveThreshold,
-    TranscriptionJobs, EstimatedCostUSD, DeliveryLatencyMinutes,
-    BriefingItemCount) to the CloudWatch namespace "AgenticSDLCIntel" —
-    the same namespace referenced by the CDK dashboard and alarms — so that
-    operators can monitor pipeline health through the AWS Console without
-    namespace mismatch errors.
+    Given the CDK PipelineStack is synthesized, when the CloudFormation template
+    is inspected, the pipeline S3 bucket has at least one S3 lifecycle rule that
+    expires objects after 30 days — automatically deleting raw content, transcripts,
+    scored items, and briefings older than 30 days without manual operator action.
     """
-    monkeypatch.setenv("PIPELINE_BUCKET", "test-pipeline-bucket")
-    monkeypatch.setenv("RUN_DATE", "2026-03-24")
-    monkeypatch.setenv("COST_ALERT_THRESHOLD_USD", "100.00")
-    monkeypatch.setenv("SES_SENDER", "alerts@example.com")
-    monkeypatch.setenv("ALERT_RECIPIENT", "admin@example.com")
+    app = cdk.App()
+    stack = PipelineStack(app, "TestPipelineStack")
+    template = assertions.Template.from_stack(stack)
 
-    s3 = boto3.client("s3", region_name="us-east-1")
-    s3.create_bucket(Bucket="test-pipeline-bucket")
-
-    pipeline_run = {
-        "run_date": "2026-03-24",
-        "started_at": "2026-03-24T06:00:00+00:00",
-        "completed_at": "2026-03-24T07:30:00+00:00",
-        "sources_attempted": 12,
-        "sources_succeeded": 11,
-        "sources_failed": 1,
-        "items_ingested": 47,
-        "items_scored": 47,
-        "items_above_threshold": 8,
-        "items_in_briefing": 8,
-        "transcription_jobs": 3,
-        "estimated_cost_usd": 2.47,
-        "delivery_status": "delivered",
-    }
-    s3.put_object(
-        Bucket="test-pipeline-bucket",
-        Key="pipeline-runs/2026-03-24/run.json",
-        Body=json.dumps(pipeline_run),
-    )
-
-    mock_cloudwatch = MagicMock()
-    mock_cloudwatch.put_metric_data.return_value = {}
-    mock_ses = MagicMock()
-
-    moto_boto3_client = boto3.client
-
-    def client_factory(service, **kw):
-        if service == "cloudwatch":
-            return mock_cloudwatch
-        if service == "ses":
-            return mock_ses
-        return moto_boto3_client(service, **kw)
-
-    with patch("src.monitoring.handler.boto3.client", side_effect=client_factory):
-        result = handler({}, None)
-
-    assert result["status"] == "ok"
-
-    # Collect all metrics published per namespace across all put_metric_data calls
-    metrics_by_namespace: dict[str, set] = {}
-    for call in mock_cloudwatch.put_metric_data.call_args_list:
-        kw = call.kwargs or {}
-        namespace = kw.get("Namespace", "")
-        metric_data = kw.get("MetricData", [])
-        names = {m.get("MetricName", "") for m in metric_data}
-        metrics_by_namespace.setdefault(namespace, set()).update(names)
-
-    # All required per-run metrics must be published to "AgenticSDLCIntel"
-    published_in_target = metrics_by_namespace.get("AgenticSDLCIntel", set())
-
-    missing = REQUIRED_METRICS - published_in_target
-    assert not missing, (
-        f"The following metrics were not published to 'AgenticSDLCIntel' namespace: "
-        f"{sorted(missing)}. "
-        f"Metrics found in 'AgenticSDLCIntel': {sorted(published_in_target)}. "
-        f"All namespaces published to: {list(metrics_by_namespace.keys())}. "
-        "All per-run metrics must use 'AgenticSDLCIntel' so the CDK-defined "
-        "dashboard and alarms can reference them without namespace mismatch."
+    # The pipeline bucket must have a lifecycle configuration with a 30-day expiration rule.
+    # AWS CDK emits this as an AWS::S3::Bucket resource with LifecycleConfiguration.Rules
+    # containing at least one rule with ExpirationInDays=30 and Status=Enabled.
+    template.has_resource_properties(
+        "AWS::S3::Bucket",
+        {
+            "LifecycleConfiguration": {
+                "Rules": assertions.Match.array_with([
+                    assertions.Match.object_like({
+                        "ExpirationInDays": 30,
+                        "Status": "Enabled",
+                    })
+                ])
+            }
+        },
     )
 
 ## Public Interfaces (from interfaces.md)
@@ -443,3 +373,9 @@ The constitution contains only template placeholders with no specific principles
 - **Category**: RED-FAILURE
 - **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
 - **Added after**: B029 at 2026-03-25T04:38:24Z
+
+
+### Sign: aws_cdk not installed — CDK infra tests fail at collection
+- **Category**: RED-FAILURE
+- **Detail**: `import aws_cdk` raises `ModuleNotFoundError` because `aws_cdk` is not in the test environment. The GREEN phase must install `aws_cdk` and `aws-cdk-lib` (e.g., `python3 -m pip install aws-cdk-lib constructs`) before the CDK assertions can run. The `infra/` package also needs `__init__.py` files at each level so Python treats it as a package.
+- **Added after**: B036 at 2026-03-25T04:59:18Z

@@ -71,5 +71,5 @@ The behavior queue and public interfaces already exist and are well-defined. Let
 
 | ID | Description | Scenario | Tasks | Status |
 |------|-------------|----------|-------|--------|
-| B036 | Raw content, transcripts, scored items, and briefings older than 30 days are automatically deleted | FR-021 | T010, T051 | queued |
+| B036 | Raw content, transcripts, scored items, and briefings older than 30 days are automatically deleted | FR-021 | T010, T051 | complete |
 

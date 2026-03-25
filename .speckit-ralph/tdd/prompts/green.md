@@ -40,17 +40,17 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails as expected with a clear error message.
+The test fails at collection because `aws_cdk` is not installed and `infra/stacks/pipeline_stack.py` doesn't exist — both are valid RED states confirming there is no implementation.
 
 ```
-FILE: tests/unit/test_cloudwatch_metrics_namespace.py
+FILE: tests/unit/test_s3_lifecycle_retention.py
 ```
 
-The test fails because the handler currently:
-1. Publishes per-run metrics to `"AiResearcher/Pipeline"` instead of `"AgenticSDLCIntel"`
-2. Is missing 3 required metrics: `SourcesFailed`, `DeliveryLatencyMinutes`, `BriefingItemCount`
+The test imports `PipelineStack` from the not-yet-created `infra/stacks/pipeline_stack.py` and uses `aws_cdk.assertions.Template` to verify the synthesized CloudFormation template contains an S3 bucket with a lifecycle rule of `ExpirationInDays=30` and `Status=Enabled`. It fails with `ModuleNotFoundError` for `aws_cdk` (not installed) and would then fail for the missing `infra` package — both confirming no implementation exists.
 
-The GREEN phase will need to move all per-run `put_metric_data` calls to the `"AgenticSDLCIntel"` namespace and add the three missing metrics.
+### Sign: aws_cdk not installed — CDK infra tests fail at collection
+- **Category**: RED-FAILURE
+- **Detail**: `import aws_cdk` raises `ModuleNotFoundError` because `aws_cdk` is not in the test environment. The GREEN phase must install `aws_cdk` and `aws-cdk-lib` (e.g., `python3 -m pip install aws-cdk-lib constructs`) before the CDK assertions can run. The `infra/` package also needs `__init__.py` files at each level so Python treats it as a package.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -732,7 +732,7 @@ def deduplicate_by_semantics(scored_items):
 import json
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
 
@@ -753,6 +753,19 @@ def _load_rolling_runs(s3, bucket, run_date_str, days=7):
     return runs
 
 
+def _delivery_latency_minutes(run):
+    started = run.get("started_at", "")
+    completed = run.get("completed_at", "")
+    if not started or not completed:
+        return 0.0
+    try:
+        t0 = datetime.fromisoformat(started)
+        t1 = datetime.fromisoformat(completed)
+        return (t1 - t0).total_seconds() / 60.0
+    except Exception:
+        return 0.0
+
+
 def handler(event: dict, context: object) -> dict:
     bucket = os.environ["PIPELINE_BUCKET"]
     run_date = os.environ.get("RUN_DATE", "")
@@ -762,10 +775,13 @@ def handler(event: dict, context: object) -> dict:
     run = json.loads(obj["Body"].read())
 
     sources_succeeded = run.get("sources_succeeded", 0)
+    sources_failed = run.get("sources_failed", 0)
     items_ingested = run.get("items_ingested", 0)
     items_above_threshold = run.get("items_above_threshold", 0)
+    items_in_briefing = run.get("items_in_briefing", 0)
     transcription_jobs = run.get("transcription_jobs", 0)
     estimated_cost_usd = run.get("estimated_cost_usd", 0.0)
+    delivery_latency = _delivery_latency_minutes(run)
 
     logger.info(
         "Pipeline run complete: sources_scanned=%s items_ingested=%s "
@@ -779,13 +795,16 @@ def handler(event: dict, context: object) -> dict:
 
     cloudwatch = boto3.client("cloudwatch")
     cloudwatch.put_metric_data(
-        Namespace="AiResearcher/Pipeline",
+        Namespace="AgenticSDLCIntel",
         MetricData=[
             {"MetricName": "SourcesScanned", "Value": sources_succeeded, "Unit": "Count"},
+            {"MetricName": "SourcesFailed", "Value": sources_failed, "Unit": "Count"},
             {"MetricName": "ItemsIngested", "Value": items_ingested, "Unit": "Count"},
             {"MetricName": "ItemsAboveThreshold", "Value": items_above_threshold, "Unit": "Count"},
             {"MetricName": "TranscriptionJobs", "Value": transcription_jobs, "Unit": "Count"},
             {"MetricName": "EstimatedCostUSD", "Value": estimated_cost_usd, "Unit": "None"},
+            {"MetricName": "DeliveryLatencyMinutes", "Value": delivery_latency, "Unit": "None"},
+            {"MetricName": "BriefingItemCount", "Value": items_in_briefing, "Unit": "Count"},
         ],
     )
 
@@ -980,3 +999,9 @@ tests/
 - **Category**: RED-FAILURE
 - **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
 - **Added after**: B029 at 2026-03-25T04:38:24Z
+
+
+### Sign: aws_cdk not installed — CDK infra tests fail at collection
+- **Category**: RED-FAILURE
+- **Detail**: `import aws_cdk` raises `ModuleNotFoundError` because `aws_cdk` is not in the test environment. The GREEN phase must install `aws_cdk` and `aws-cdk-lib` (e.g., `python3 -m pip install aws-cdk-lib constructs`) before the CDK assertions can run. The `infra/` package also needs `__init__.py` files at each level so Python treats it as a package.
+- **Added after**: B036 at 2026-03-25T04:59:18Z
