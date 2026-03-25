@@ -40,13 +40,15 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Failing Test (from RED step)
 
-Test fails at import — `src.scoring.deduplication` doesn't exist. This is the correct RED state (no implementation yet, `ScoredItem` also missing from models).
+Test fails exactly as expected. The business-strategy item gets flagged `is_duplicate=True` because the current prompt omits `scoring_reasoning`, so the mock returns `is_duplicate: true`.
 
 ```
-FILE: tests/unit/test_semantic_deduplication.py
+FILE: tests/unit/test_semantic_deduplication_different_angles.py
 ```
 
-The test fails with `ModuleNotFoundError: No module named 'src.scoring.deduplication'` — confirming RED phase. It also implicitly requires `ScoredItem` in `src/shared/models.py`, which doesn't exist yet.
+**What the test verifies**: When two items share a topic but have genuinely different angles documented in `scoring_reasoning`, the LLM deduplication prompt must include `scoring_reasoning` so the LLM can distinguish "same development reported twice" from "same topic, different angle." The mock returns `is_duplicate: true` whenever reasoning is absent from the prompt — which is the current state — causing the business-strategy item to be incorrectly flagged as a duplicate.
+
+**Fix required**: Update `_are_duplicates` in `src/scoring/deduplication.py` to include `item.scoring_reasoning` in the prompt sent to Bedrock.
 
 ## Existing Code (for context — extend or modify as needed)
 
@@ -512,6 +514,18 @@ class ContentItem:
     content_format: str = "text"  # text / audio / video
     transcript_status: str = "not_needed"  # pending / completed / failed / not_needed
 
+
+@dataclass
+class ScoredItem:
+    content_item_id: str
+    relevance_score: int
+    urgency: str
+    relevance_tag: str
+    executive_summary: str
+    scoring_reasoning: str
+    is_duplicate: bool = False
+    duplicate_of: Optional[str] = None
+
 --- src/briefing/handler.py ---
 # src/briefing/handler.py
 import json
@@ -618,6 +632,52 @@ def handler(event, context):
                 items_above_threshold += 1
 
     return {"items_scored": items_scored, "items_above_threshold": items_above_threshold}
+
+--- src/scoring/deduplication.py ---
+# src/scoring/deduplication.py
+import json
+
+import boto3
+
+
+def _are_duplicates(bedrock, item_a, item_b):
+    prompt = (
+        f"Item A summary: {item_a.executive_summary}\n"
+        f"Item B summary: {item_b.executive_summary}\n\n"
+        "Do these items cover the same core development? "
+        "Respond with JSON: {\"is_duplicate\": true} or {\"is_duplicate\": false}."
+    )
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 64,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+    })
+    response = bedrock.invoke_model(
+        modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        body=body,
+        contentType="application/json",
+        accept="application/json",
+    )
+    text = json.loads(response["body"].read())["content"][0]["text"]
+    return json.loads(text).get("is_duplicate", False)
+
+
+def deduplicate_by_semantics(scored_items):
+    bedrock = boto3.client("bedrock-runtime")
+    items = sorted(scored_items, key=lambda x: x.relevance_score, reverse=True)
+
+    for i in range(len(items)):
+        if items[i].is_duplicate:
+            continue
+        for j in range(i + 1, len(items)):
+            if items[j].is_duplicate:
+                continue
+            if _are_duplicates(bedrock, items[i], items[j]):
+                items[j].is_duplicate = True
+                items[j].duplicate_of = items[i].content_item_id
+
+    return items
 
 ## Plan Context (language, framework, project structure)
 
@@ -775,3 +835,9 @@ tests/
 - **Category**: RED-FAILURE
 - **Detail**: The source-removal behavior (B024 Behavior A) is already covered by the existing `handler.py` implementation: `load_sources()` reads only from the active `SOURCES_CONFIG` file, so any source absent from YAML is never attempted. The corrected single-assertion RED test (`sources_attempted == 1`, no S3 keys under `src-removed-002/`, at least one key under `src-remaining-001/`) passes immediately without new implementation. When a behavior is already implemented by prior GREEN phases, the RED test will be green from the start — treat this as "behavior pre-implemented" and advance directly to VALIDATE.
 - **Added after**: B024 at 2026-03-25T04:22:49Z
+
+
+### Sign: B029 behavior pre-implemented — RED phase produces GREEN test
+- **Category**: RED-FAILURE
+- **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
+- **Added after**: B029 at 2026-03-25T04:38:24Z

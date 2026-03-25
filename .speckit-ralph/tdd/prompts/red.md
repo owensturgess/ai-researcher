@@ -43,8 +43,27 @@ If you encounter a failure that future steps should learn from, output a guardra
 
 ## Behavior Under Test
 
-Behavior B028: Given two content items from different sources cover the same development, only the highest-relevance version appears in the briefing
-Linked tasks: T041, T042, T043
+Behavior B029: Given two items have similar topics but genuinely different angles or insights, both items are retained as distinct entries
+Linked tasks: T042, T043
+
+## Previous Validation Feedback (MUST address these issues)
+GATE: VERIFY_RED for B029
+CHECK 1 FAIL: New test PASSED but should have FAILED.
+The test at tests/unit/test_semantic_deduplication_different_angles.py already passes without new implementation.
+This means the test is not testing new behavior — it's either trivial or testing existing functionality.
+Test output:
+============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0 -- /Library/Frameworks/Python.framework/Versions/3.14/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/ocs/Documents/GitHub/ai-researcher
+plugins: cov-7.0.0
+collecting ... collected 1 item
+
+tests/unit/test_semantic_deduplication_different_angles.py::test_items_with_different_angles_on_same_topic_are_both_retained_as_distinct_entries PASSED
+
+============================== 1 passed in 0.17s ===============================
+CHECK 2 PASS: Full test suite passes.
+RESULT: FAIL
 
 ## Public Interfaces (from interfaces.md)
 
@@ -650,6 +669,91 @@ def test_removed_source_id_is_absent_from_run_record_source_id_list(
     )
     assert "src-removed-002" not in source_ids, (
         f"src-removed-002 must not appear in source_ids_attempted after removal, got: {source_ids}"
+    )
+
+--- tests/unit/test_semantic_deduplication.py ---
+# tests/unit/test_semantic_deduplication.py
+#
+# Behavior B028: Given two content items from different sources cover the same
+# development, only the highest-relevance version appears in the briefing.
+#
+# Tests the public interface deduplicate_by_semantics(scored_items) in
+# src/scoring/deduplication.py. When two ScoredItems cover the same core
+# development, the lower-relevance item must be flagged with is_duplicate=True
+# and duplicate_of pointing to the higher-relevance item's content_item_id.
+import json
+from unittest.mock import MagicMock, patch
+
+from src.scoring.deduplication import deduplicate_by_semantics
+from src.shared.models import ScoredItem
+
+
+def test_lower_relevance_item_flagged_as_duplicate_when_two_sources_cover_same_development():
+    """
+    Given two ScoredItems from different sources covering the same Claude 4
+    release (score 85 and score 60), when deduplicate_by_semantics() runs,
+    the lower-relevance item has is_duplicate=True and duplicate_of set to
+    the higher-relevance item's content_item_id, while the higher-relevance
+    item remains is_duplicate=False.
+    """
+    item_primary = ScoredItem(
+        content_item_id="item-claude4-techcrunch",
+        relevance_score=85,
+        urgency="worth_discussing",
+        relevance_tag="AI Tools",
+        executive_summary=(
+            "Anthropic releases Claude 4 with major agentic software development "
+            "capabilities, enabling autonomous multi-step coding workflows."
+        ),
+        scoring_reasoning="Directly relevant to agentic SDLC transformation goals.",
+        is_duplicate=False,
+        duplicate_of=None,
+    )
+
+    item_duplicate = ScoredItem(
+        content_item_id="item-claude4-verge",
+        relevance_score=60,
+        urgency="informational",
+        relevance_tag="AI Tools",
+        executive_summary=(
+            "Claude 4 AI assistant launched by Anthropic with new coding and "
+            "agentic features announced today."
+        ),
+        scoring_reasoning="Same Claude 4 release covered from a consumer angle.",
+        is_duplicate=False,
+        duplicate_of=None,
+    )
+
+    # Mock Bedrock at the AWS service boundary — LLM identifies the pair as duplicates
+    # and nominates item-claude4-techcrunch (higher score) as the primary version.
+    llm_response = json.dumps({"is_duplicate": True})
+    mock_stream = MagicMock()
+    mock_stream.read.return_value = json.dumps(
+        {"content": [{"text": llm_response}]}
+    ).encode("utf-8")
+
+    mock_bedrock = MagicMock()
+    mock_bedrock.invoke_model.return_value = {"body": mock_stream}
+
+    with patch("src.scoring.deduplication.boto3.client", return_value=mock_bedrock):
+        result = deduplicate_by_semantics([item_primary, item_duplicate])
+
+    by_id = {item.content_item_id: item for item in result}
+
+    # Higher-relevance item must remain primary — not flagged as duplicate
+    assert by_id["item-claude4-techcrunch"].is_duplicate is False, (
+        "The highest-relevance item must not be flagged as a duplicate."
+    )
+    assert by_id["item-claude4-techcrunch"].duplicate_of is None
+
+    # Lower-relevance item must be flagged as a duplicate of the primary
+    assert by_id["item-claude4-verge"].is_duplicate is True, (
+        "The lower-relevance item covering the same development must be flagged "
+        "is_duplicate=True so it is excluded from the briefing."
+    )
+    assert by_id["item-claude4-verge"].duplicate_of == "item-claude4-techcrunch", (
+        f"duplicate_of must point to the primary item id, "
+        f"got: {by_id['item-claude4-verge'].duplicate_of!r}"
     )
 
 --- tests/unit/test_scoring_reliability.py ---
@@ -2230,3 +2334,9 @@ tests/
 - **Category**: RED-FAILURE
 - **Detail**: The source-removal behavior (B024 Behavior A) is already covered by the existing `handler.py` implementation: `load_sources()` reads only from the active `SOURCES_CONFIG` file, so any source absent from YAML is never attempted. The corrected single-assertion RED test (`sources_attempted == 1`, no S3 keys under `src-removed-002/`, at least one key under `src-remaining-001/`) passes immediately without new implementation. When a behavior is already implemented by prior GREEN phases, the RED test will be green from the start — treat this as "behavior pre-implemented" and advance directly to VALIDATE.
 - **Added after**: B024 at 2026-03-25T04:22:49Z
+
+
+### Sign: B029 behavior pre-implemented — RED phase produces GREEN test
+- **Category**: RED-FAILURE
+- **Detail**: The "different angles → both retained" path (B029) is automatically satisfied by the B028 implementation in `deduplicate_by_semantics`. When `_are_duplicates()` returns `False`, the function simply skips flagging — no additional code path needed. The RED test passes immediately. Per the established guardrail pattern (see B024), advance directly to VALIDATE.
+- **Added after**: B029 at 2026-03-25T04:38:24Z

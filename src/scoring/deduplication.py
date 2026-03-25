@@ -7,7 +7,9 @@ import boto3
 def _are_duplicates(bedrock, item_a, item_b):
     prompt = (
         f"Item A summary: {item_a.executive_summary}\n"
-        f"Item B summary: {item_b.executive_summary}\n\n"
+        f"Item A reasoning: {item_a.scoring_reasoning}\n"
+        f"Item B summary: {item_b.executive_summary}\n"
+        f"Item B reasoning: {item_b.scoring_reasoning}\n\n"
         "Do these items cover the same core development? "
         "Respond with JSON: {\"is_duplicate\": true} or {\"is_duplicate\": false}."
     )
